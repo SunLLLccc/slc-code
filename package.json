@@ -1,0 +1,28 @@
+{
+  "name": "slc-code",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "CLI coding agent platform",
+  "bin": {
+    "slc": "./dist/entrypoints/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0",
+    "@types/node": "^22.0.0"
+  }
+}
