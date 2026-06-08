@@ -39,6 +39,11 @@ export interface CommandContext {
    * Called by /rewind command to restore to a previous state.
    */
   rewindToEvent?: (uuid: string) => Promise<boolean>;
+  /**
+   * Compact the conversation history.
+   * Called by /compact command to reduce context usage.
+   */
+  compactMessages?: () => void;
 }
 
 // ---------------------------------------------------------------------------
