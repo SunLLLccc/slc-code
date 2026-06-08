@@ -1,23 +1,28 @@
 // SessionManager — manages current session lifecycle in the REPL
 // Creates TranscriptWriter, writes user/assistant events, tracks current sessionDir
+// Handles cleanup and persistence modes (bare, cleanupPeriodDays=0)
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TranscriptWriter, type TranscriptEvent } from "../session/transcript.js";
+import { cleanupSessions } from "../session/cleanup.js";
 
 const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
 export interface SessionManagerOptions {
   sessionsBase?: string;
   enabled?: boolean; // false for --bare mode
+  cleanupPeriodDays?: number; // default 30; 0 = delete all + no current writer
 }
 
 export class SessionManager {
   private readonly sessionsBase: string;
   private readonly enabled: boolean;
+  private _writable = false; // false when bare mode or cleanupPeriodDays=0
   private writer: TranscriptWriter | null = null;
   private _sessionDir: string | null = null;
   private _sessionId: string | null = null;
+  private _initialized = false;
 
   constructor(options?: SessionManagerOptions) {
     this.sessionsBase = options?.sessionsBase ?? DEFAULT_SESSIONS_BASE;
@@ -25,12 +30,32 @@ export class SessionManager {
   }
 
   /**
-   * Initialize a new session. Creates session dir and TranscriptWriter.
-   * Called once at REPL startup.
+   * Initialize session lifecycle in correct order:
+   * 1. Cleanup expired sessions (awaited, not fire-and-forget)
+   * 2. If cleanupPeriodDays=0 or enabled=false → no writer (bare-like)
+   * 3. Otherwise create session dir and writer
+   *
+   * Must be called once at REPL startup. Idempotent.
    */
-  initSession(): void {
-    if (!this.enabled) return;
+  async cleanupAndInit(cleanupPeriodDays: number = 30): Promise<void> {
+    if (this._initialized) return;
+    this._initialized = true;
 
+    // Step 1: Cleanup expired sessions (awaited)
+    if (this.enabled) {
+      await cleanupSessions({
+        sessionsBase: this.sessionsBase,
+        cleanupPeriodDays,
+      });
+    }
+
+    // Step 2: If cleanupPeriodDays=0 or bare mode → no writer for current session
+    if (!this.enabled || cleanupPeriodDays === 0) {
+      return; // No session, no writer
+    }
+
+    // Step 3: Create new session with writer
+    this._writable = true;
     this._sessionId = new Date().toISOString().replace(/[:.]/g, "-");
     this._sessionDir = join(this.sessionsBase, this._sessionId);
     this.writer = new TranscriptWriter({
@@ -41,13 +66,12 @@ export class SessionManager {
 
   /**
    * Switch to an existing session (e.g. after /resume).
-   * Creates a new writer pointing to the resumed session dir.
-   * If disabled (bare mode), only updates runtime state — no writer created.
+   * If not writable (bare mode or cleanupPeriodDays=0), only updates runtime state.
    */
   switchSession(sessionDir: string): void {
     this._sessionDir = sessionDir;
     this._sessionId = sessionDir.split("/").pop() ?? sessionDir;
-    if (!this.enabled) return; // bare mode: no writer
+    if (!this._writable) return; // bare mode or cleanupPeriodDays=0: no writer
     this.writer = new TranscriptWriter({
       sessionDir,
       enabled: true,
@@ -56,6 +80,7 @@ export class SessionManager {
 
   /**
    * Append a user event to the transcript.
+   * No-op if writer is null (bare mode, cleanupPeriodDays=0, or not initialized).
    */
   async appendUserEvent(content: string): Promise<void> {
     if (!this.writer) return;
@@ -109,6 +134,11 @@ export class SessionManager {
   /** Whether persistence is enabled */
   get isEnabled(): boolean {
     return this.enabled;
+  }
+
+  /** Whether the manager has been initialized */
+  get isInitialized(): boolean {
+    return this._initialized;
   }
 
   /** Close the current writer */

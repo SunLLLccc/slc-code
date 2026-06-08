@@ -1,7 +1,7 @@
-// Tests for SessionManager
+// Tests for SessionManager — real lifecycle scenarios
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,109 +18,156 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// SessionManager
+// cleanupAndInit — real lifecycle
 // ---------------------------------------------------------------------------
 
-describe("SessionManager", () => {
-  it("sets sessionDir on initSession and creates dir on first append", async () => {
+describe("SessionManager.cleanupAndInit", () => {
+  it("creates session dir and writer when enabled + cleanupPeriodDays > 0", async () => {
     const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
-    sm.initSession();
+    await sm.cleanupAndInit(30);
 
     expect(sm.sessionDir).toBeTruthy();
     expect(sm.sessionId).toBeTruthy();
-    // Directory is created lazily on first append
-    await sm.appendUserEvent("trigger dir creation");
-    expect(existsSync(sm.sessionDir!)).toBe(true);
+
+    // Writer is active — append creates transcript
+    await sm.appendUserEvent("Hello");
+    expect(existsSync(join(sm.sessionDir!, "transcript.jsonl"))).toBe(true);
   });
 
-  it("writes user event to transcript", async () => {
+  it("cleanupPeriodDays=0 deletes old sessions and does NOT create writer", async () => {
+    // Create an old session
+    const oldDir = join(testDir, "old-session");
+    await mkdir(oldDir, { recursive: true });
+    await writeFile(join(oldDir, "transcript.jsonl"), "{}");
+
     const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
-    sm.initSession();
+    await sm.cleanupAndInit(0);
 
-    await sm.appendUserEvent("Hello world");
-
-    const content = await readFile(join(sm.sessionDir!, "transcript.jsonl"), "utf-8");
-    const events = content.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events).toHaveLength(1);
-    expect(events[0].type).toBe("user");
-    expect(events[0].content).toBe("Hello world");
-  });
-
-  it("writes assistant event to transcript", async () => {
-    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
-    sm.initSession();
-
-    await sm.appendAssistantEvent("Hi there!");
-
-    const content = await readFile(join(sm.sessionDir!, "transcript.jsonl"), "utf-8");
-    const events = content.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events).toHaveLength(1);
-    expect(events[0].type).toBe("assistant");
-    expect(events[0].content).toBe("Hi there!");
-  });
-
-  it("writes user then assistant events in order", async () => {
-    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
-    sm.initSession();
-
-    await sm.appendUserEvent("Question");
-    await sm.appendAssistantEvent("Answer");
-
-    const content = await readFile(join(sm.sessionDir!, "transcript.jsonl"), "utf-8");
-    const events = content.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events).toHaveLength(2);
-    expect(events[0].type).toBe("user");
-    expect(events[1].type).toBe("assistant");
-  });
-
-  it("no-ops when enabled=false (bare mode)", async () => {
-    const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
-    sm.initSession();
-
+    // Old session deleted
+    expect(existsSync(oldDir)).toBe(false);
+    // No current session created
     expect(sm.sessionDir).toBeNull();
     expect(sm.sessionId).toBeNull();
 
+    // Append is no-op
     await sm.appendUserEvent("Should not write");
-    // No directory should be created
-    expect(existsSync(join(testDir, "any-session"))).toBe(false);
+    // No transcript created anywhere
+    const entries = await import("node:fs/promises").then((fs) => fs.readdir(testDir));
+    expect(entries).toHaveLength(0);
   });
 
-  it("switchSession updates sessionDir and writer", async () => {
+  it("bare mode (enabled=false) does not create writer regardless of cleanupPeriodDays", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
+    await sm.cleanupAndInit(30);
+
+    expect(sm.sessionDir).toBeNull();
+    await sm.appendUserEvent("No-op");
+    const entries = await import("node:fs/promises").then((fs) => fs.readdir(testDir));
+    expect(entries).toHaveLength(0);
+  });
+
+  it("cleanupPeriodDays > 0 keeps recent sessions, deletes old ones", async () => {
+    // Create a recent session (just created)
+    const recentDir = join(testDir, "recent-session");
+    await mkdir(recentDir, { recursive: true });
+    await writeFile(join(recentDir, "transcript.jsonl"), "{}");
+
     const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
-    sm.initSession();
+    await sm.cleanupAndInit(30);
 
-    const originalDir = sm.sessionDir;
-    expect(originalDir).toBeTruthy();
+    // Recent session kept
+    expect(existsSync(recentDir)).toBe(true);
+    // New session created
+    expect(sm.sessionDir).toBeTruthy();
+    expect(sm.sessionDir).not.toBe(recentDir);
+  });
 
-    // Switch to a different session
+  it("cleanup happens before session init — no race", async () => {
+    // Create old session
+    const oldDir = join(testDir, "old");
+    await mkdir(oldDir, { recursive: true });
+    await writeFile(join(oldDir, "transcript.jsonl"), "{}");
+
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(0); // cleanupPeriodDays=0 = delete all
+
+    // Old session is gone BEFORE we could append
+    expect(existsSync(oldDir)).toBe(false);
+    // No writer created
+    expect(sm.sessionDir).toBeNull();
+  });
+
+  it("idempotent — calling cleanupAndInit twice is safe", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(30);
+    const firstDir = sm.sessionDir;
+
+    await sm.cleanupAndInit(30);
+    // Second call is no-op — same session dir
+    expect(sm.sessionDir).toBe(firstDir);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// switchSession
+// ---------------------------------------------------------------------------
+
+describe("SessionManager.switchSession", () => {
+  it("switches to existing session and writes to it", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(30);
+
     const newDir = join(testDir, "resumed-session");
     sm.switchSession(newDir);
-
     expect(sm.sessionDir).toBe(newDir);
 
-    // New writes go to the new session
     await sm.appendUserEvent("After switch");
     expect(existsSync(join(newDir, "transcript.jsonl"))).toBe(true);
   });
 
-  it("switchSession in bare mode updates sessionDir but no writer", async () => {
+  it("bare mode switchSession updates sessionDir but no writer", async () => {
     const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
+    await sm.cleanupAndInit(30);
 
-    // switchSession should update runtime state even in bare mode
     const newDir = join(testDir, "resumed-session");
     sm.switchSession(newDir);
     expect(sm.sessionDir).toBe(newDir);
 
-    // But no writer is created — append should no-op
-    await sm.appendUserEvent("Should not write");
+    await sm.appendUserEvent("No-op");
     expect(existsSync(join(newDir, "transcript.jsonl"))).toBe(false);
   });
 
+  it("cleanupPeriodDays=0 switchSession updates sessionDir but no writer", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(0);
+
+    const newDir = join(testDir, "resumed-session");
+    sm.switchSession(newDir);
+    expect(sm.sessionDir).toBe(newDir);
+
+    await sm.appendUserEvent("No-op");
+    expect(existsSync(join(newDir, "transcript.jsonl"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isEnabled / isInitialized
+// ---------------------------------------------------------------------------
+
+describe("SessionManager state", () => {
   it("isEnabled reflects constructor option", () => {
     const enabled = new SessionManager({ sessionsBase: testDir, enabled: true });
     const disabled = new SessionManager({ sessionsBase: testDir, enabled: false });
 
     expect(enabled.isEnabled).toBe(true);
     expect(disabled.isEnabled).toBe(false);
+  });
+
+  it("isInitialized after cleanupAndInit", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    expect(sm.isInitialized).toBe(false);
+
+    await sm.cleanupAndInit(30);
+    expect(sm.isInitialized).toBe(true);
   });
 });

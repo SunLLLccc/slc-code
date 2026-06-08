@@ -2,8 +2,6 @@
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp } from "ink";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
 import type { StreamEvent } from "../engine/types.js";
@@ -51,16 +49,11 @@ export function ReplApp({
     new SessionManager({ sessionsBase, enabled: persistenceEnabled }),
   );
 
-  // Initialize session on mount, cleanup expired sessions first
+  // Initialize session lifecycle: cleanup (awaited) → init writer
+  // Order is guaranteed — no race between cleanup and append
   useEffect(() => {
     const sm = sessionManagerRef.current;
-    // Cleanup expired sessions before initializing new one
-    if (sm.isEnabled) {
-      import("../session/cleanup.js").then(({ cleanupSessions }) => {
-        cleanupSessions({ sessionsBase: sessionsBase ?? join(homedir(), ".slc", "sessions"), cleanupPeriodDays });
-      }).catch(() => { /* best-effort */ });
-    }
-    sm.initSession();
+    sm.cleanupAndInit(cleanupPeriodDays).catch(() => { /* best-effort */ });
     return () => {
       sm.close();
     };
