@@ -15,6 +15,8 @@ import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
 import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
 import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
 import { setAgentContext } from "../tools/builtin/agent.js";
+import { createPermissionChecker } from "../permissions/checker.js";
+import { parseRule } from "../permissions/rules.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -66,16 +68,27 @@ export function ReplApp({
       const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
       const toolRegistry = createBuiltinRegistry();
       const toolContext = { cwd };
+      // Build permission checker from config rules
+      const rulesConfig = commandContext.config?.rules as string[] | undefined;
+      const rules = (rulesConfig ?? []).map((r) => parseRule(r, "allow"));
+      const permissionChecker = createPermissionChecker({
+        mode: (commandContext.config?.permissionMode as string as any) ?? "default",
+        rules,
+        projectRoot: cwd,
+      });
       engineRef.current = new QueryEngine(provider, {
         ...(systemPrompt ? { systemPrompt } : undefined),
+        tools: toolRegistry.toProviderTools(),
         toolRegistry,
         toolContext,
+        permissionChecker,
       });
       // Wire AgentTool with provider and permissions
       setAgentContext({
         provider,
         sessionDir: sm.sessionDir ?? cwd,
         toolRegistry,
+        permissionChecker,
       });
     }).catch(() => {
       engineRef.current = new QueryEngine(provider);
@@ -109,7 +122,7 @@ export function ReplApp({
         compactMessages: () => {
           engine.compact();
         },
-        resumeSession: createResumeSession(engine, sm, sessionsBase),
+        resumeSession: createResumeSession(engine, sm, sessionsBase, { provider }),
         rewindToEvent: createRewindToEvent(engine, sm, sessionsBase),
         config: {
           ...commandContext.config,

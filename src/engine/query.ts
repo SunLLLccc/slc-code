@@ -62,31 +62,32 @@ export async function* query(
     turnCount++;
 
     let assistantText = "";
-    const toolCalls: Array<{ id: string; name: string; argsJson: string }> = [];
+    // Use Map for safe tool_call_args attribution by id
+    const toolCallMap = new Map<string, { id: string; name: string; argsJson: string }>();
     let providerEmittedDone = false;
 
     try {
       for await (const raw of provider.chat(conversation, tools, signal)) {
-        // Apply capability filtering — drop events the provider shouldn't produce
         const event = filterEventForCapabilities(raw, caps);
         if (event === null) continue;
 
-        // Track whether provider emitted a terminal done
         if (event.type === "done") {
           providerEmittedDone = true;
         }
 
-        // Collect assistant text from text_delta events
         if (event.type === "text_delta") {
           assistantText += event.text;
         }
 
-        // Collect tool calls
+        // Collect tool calls by id — safe for interleaved args
         if (event.type === "tool_call_start") {
-          toolCalls.push({ id: event.id, name: event.name, argsJson: "" });
+          toolCallMap.set(event.id, { id: event.id, name: event.name, argsJson: "" });
         }
-        if (event.type === "tool_call_args" && toolCalls.length > 0) {
-          toolCalls[toolCalls.length - 1]!.argsJson += event.args_json;
+        if (event.type === "tool_call_args") {
+          const existing = toolCallMap.get(event.id);
+          if (existing) {
+            existing.argsJson += event.args_json;
+          }
         }
 
         yield event;
@@ -97,11 +98,19 @@ export async function* query(
       return;
     }
 
-    // Append the assistant response to conversation
-    if (assistantText || toolCalls.length > 0) {
-      if (assistantText) {
-        conversation.push({ role: "assistant", content: assistantText });
-      }
+    const toolCalls = [...toolCallMap.values()];
+
+    // Append assistant message with toolCalls to conversation
+    if (toolCalls.length > 0) {
+      // Assistant message with tool calls
+      conversation.push({
+        role: "assistant",
+        content: assistantText || "",
+        toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.argsJson })),
+      });
+    } else if (assistantText) {
+      // Plain text assistant message
+      conversation.push({ role: "assistant", content: assistantText });
     }
 
     // If no tool calls, we're done — guarantee a terminal done
@@ -145,7 +154,6 @@ export async function* query(
         };
         conversation.push(toolResult);
 
-        // Yield tool_call_result event for the stream
         yield {
           type: "tool_call_result",
           id: result.toolCallId,
@@ -159,7 +167,6 @@ export async function* query(
       return;
     }
 
-    // Check max turns
     if (turnCount >= maxTurns) {
       if (!providerEmittedDone) {
         yield { type: "done", reason: "max_turns" };
@@ -170,6 +177,5 @@ export async function* query(
     // Loop back to get next provider response with tool results
   }
 
-  // Max turns reached without completing
   yield { type: "done", reason: "max_turns" };
 }

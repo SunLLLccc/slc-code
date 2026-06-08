@@ -9,18 +9,21 @@ import {
   getAvailableSessions,
   rebuildSessionState,
 } from "../session/resume.js";
+import { setAgentContext } from "../tools/builtin/agent.js";
+import type { Provider } from "../engine/providers/base.js";
 
 const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
 /**
  * Create a resumeSession callback for CommandContext.
  * Loads transcript, rebuilds ProviderMessages, loads into QueryEngine,
- * AND updates SessionManager to track the resumed session as current.
+ * AND updates SessionManager + AgentTool sessionDir.
  */
 export function createResumeSession(
   engine: QueryEngine,
   sessionManager: SessionManager,
   sessionsBase: string = DEFAULT_SESSIONS_BASE,
+  options?: { provider?: Provider },
 ): (sessionDir: string) => Promise<boolean> {
   return async (sessionDir: string): Promise<boolean> => {
     const result = await loadTranscript(sessionDir);
@@ -31,6 +34,10 @@ export function createResumeSession(
     engine.loadMessages(messages);
     // Update SessionManager to track resumed session as current
     await sessionManager.switchSession(sessionDir);
+    // Update AgentTool sessionDir so sidechain writes go to resumed session
+    if (options?.provider) {
+      setAgentContext({ provider: options.provider, sessionDir });
+    }
     return true;
   };
 }

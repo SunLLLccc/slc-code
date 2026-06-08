@@ -56,6 +56,55 @@ describe("/tasks command", () => {
     expect(tasksCommand.name).toBe("tasks");
     expect(tasksCommand.description).toBeTruthy();
   });
+
+  it("filter by status", async () => {
+    await taskCreateTool.execute({ subject: "Pending task" }, TOOL_CTX);
+    const created = await taskCreateTool.execute({ subject: "Done task" }, TOOL_CTX);
+    const id = created.metadata!.taskId as string;
+    getTaskStore().get(id)!.status = "completed";
+
+    const result = tasksCommand.execute("filter completed", CMD_CTX);
+    expect(result).toContain("Done task");
+    expect(result).not.toContain("Pending task");
+  });
+
+  it("filter returns message when no matches", async () => {
+    await taskCreateTool.execute({ subject: "Pending" }, TOOL_CTX);
+    const result = tasksCommand.execute("filter completed", CMD_CTX);
+    expect(result).toContain("No tasks with status");
+  });
+
+  it("filter rejects invalid status", () => {
+    const result = tasksCommand.execute("filter bogus", CMD_CTX);
+    expect(result).toContain("Invalid status");
+  });
+
+  it("update task status", async () => {
+    const created = await taskCreateTool.execute({ subject: "Updatable" }, TOOL_CTX);
+    const id = created.metadata!.taskId as string;
+
+    const result = tasksCommand.execute(`update ${id} completed`, CMD_CTX);
+    expect(result).toContain("updated");
+    expect(result).toContain("completed");
+    expect(getTaskStore().get(id)!.status).toBe("completed");
+  });
+
+  it("update returns error for unknown id", () => {
+    const result = tasksCommand.execute("update nonexistent completed", CMD_CTX);
+    expect(result).toContain("not found");
+  });
+
+  it("update rejects invalid status", async () => {
+    const created = await taskCreateTool.execute({ subject: "X" }, TOOL_CTX);
+    const id = created.metadata!.taskId as string;
+    const result = tasksCommand.execute(`update ${id} bogus`, CMD_CTX);
+    expect(result).toContain("Invalid status");
+  });
+
+  it("update returns usage when missing args", () => {
+    const result = tasksCommand.execute("update", CMD_CTX);
+    expect(result).toContain("Unknown subcommand");
+  });
 });
 
 // ---------------------------------------------------------------------------
