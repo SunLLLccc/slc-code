@@ -124,7 +124,11 @@ export function createProgram(
             provider: resolved,
             model,
           });
-          const printResult = await doExecutePrint(provider, options.print);
+          const skipPromptAssembly = options.bare ?? false;
+          const printResult = await doExecutePrint(provider, options.print, {
+            cwd,
+            skipPromptAssembly,
+          });
 
           if (printResult.hasError) {
             process.stderr.write(`Error: ${printResult.errorMessage}\n`);
@@ -151,7 +155,11 @@ export function createProgram(
             provider: resolved,
             model,
           });
-          const stdinResult = await doExecuteStdin(provider);
+          const skipPromptAssembly = options.bare ?? false;
+          const stdinResult = await doExecuteStdin(provider, {
+            cwd,
+            skipPromptAssembly,
+          });
 
           if (stdinResult.hasError) {
             process.stderr.write(`Error: ${stdinResult.errorMessage}\n`);

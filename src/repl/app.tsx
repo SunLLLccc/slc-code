@@ -2,12 +2,17 @@
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp } from "ink";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
 import type { StreamEvent } from "../engine/types.js";
 import type { CommandRegistry, CommandContext } from "../commands/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
+import { assembleSystemPrompt } from "../prompt/assembly.js";
+import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
+import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -36,11 +41,7 @@ export function ReplApp({
   const [streaming, setStreaming] = useState(false);
   const [currentModel, setCurrentModel] = useState(initialModel ?? "");
 
-  // Persistent QueryEngine — survives across queries, reset on /clear
-  const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
-
   // Session manager — tracks current session, writes transcript
-  // Read from config.session.persistenceEnabled (not config.persistenceEnabled)
   const sessionConfig = commandContext.config?.session as { persistenceEnabled?: boolean; cleanupPeriodDays?: number } | undefined;
   const sessionsBase = (commandContext.config?.sessionsBase as string) ?? undefined;
   const persistenceEnabled = sessionConfig?.persistenceEnabled ?? true;
@@ -49,11 +50,23 @@ export function ReplApp({
     new SessionManager({ sessionsBase, enabled: persistenceEnabled }),
   );
 
-  // Initialize session lifecycle: cleanup (awaited) → init writer
-  // Order is guaranteed — no race between cleanup and append
+  // QueryEngine — initialized async with prompt assembly
+  const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
+  const engineInitRef = useRef<Promise<void> | null>(null);
+
+  // Initialize session + build system prompt + create QueryEngine
   useEffect(() => {
     const sm = sessionManagerRef.current;
-    sm.cleanupAndInit(cleanupPeriodDays).catch(() => { /* best-effort */ });
+    const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
+    const userConfigDir = join(homedir(), ".slc");
+
+    engineInitRef.current = sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
+      const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
+      if (systemPrompt) {
+        engineRef.current = new QueryEngine(provider, { systemPrompt });
+      }
+    }).catch(() => { /* fallback: use default engine without system prompt */ });
+
     return () => {
       sm.close();
     };
@@ -65,7 +78,11 @@ export function ReplApp({
 
   const handleCommand = useCallback(
     async (cmd: string): Promise<boolean> => {
+      // Wait for engine initialization to complete
+      if (engineInitRef.current) await engineInitRef.current;
       const sm = sessionManagerRef.current;
+      const engine = engineRef.current;
+
       const ctx: CommandContext = {
         ...commandContext,
         model: currentModel,
@@ -73,10 +90,13 @@ export function ReplApp({
           setCurrentModel(m);
         },
         clearConversation: () => {
-          engineRef.current.reset();
+          engine.reset();
         },
-        resumeSession: createResumeSession(engineRef.current, sm, sessionsBase),
-        rewindToEvent: createRewindToEvent(engineRef.current, sm, sessionsBase),
+        compactMessages: () => {
+          engine.compact();
+        },
+        resumeSession: createResumeSession(engine, sm, sessionsBase),
+        rewindToEvent: createRewindToEvent(engine, sm, sessionsBase),
         config: {
           ...commandContext.config,
           sessionDir: sm.sessionDir ?? undefined,
@@ -105,6 +125,10 @@ export function ReplApp({
       return;
     }
 
+    // Wait for engine initialization to complete
+    if (engineInitRef.current) await engineInitRef.current;
+    const engine = engineRef.current;
+
     // Write user event to transcript
     await sessionManagerRef.current.appendUserEvent(query);
 
@@ -113,7 +137,7 @@ export function ReplApp({
     let responseText = "";
 
     try {
-      for await (const event of engineRef.current.query(query)) {
+      for await (const event of engine.query(query)) {
         if (event.type === "text_delta") {
           responseText += event.text;
         }
@@ -127,6 +151,20 @@ export function ReplApp({
         addOutput(responseText);
         // Write assistant event to transcript
         await sessionManagerRef.current.appendAssistantEvent(responseText);
+        // Persist session memory if threshold reached
+        const sm = sessionManagerRef.current;
+        await persistSessionMemory(engine.getMessages(), sm.sessionDir, sm.isEnabled);
+        // Auto-memory extraction → write to memoryDir
+        // Priority: config.memoryDir > project {cwd}/.slc/memory (no user fallback)
+        const memoryConfig = commandContext.config?.memory as { autoMemoryEnabled?: boolean } | undefined;
+        const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
+        await processAutoMemory(query, responseText, {
+          persistenceEnabled: sm.isEnabled,
+          autoMemoryEnabled: memoryConfig?.autoMemoryEnabled ?? true,
+          cleanupPeriodDays,
+          cwd,
+          memoryDir: commandContext.config?.memoryDir as string | undefined,
+        });
       }
     } catch (e) {
       addOutput(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
