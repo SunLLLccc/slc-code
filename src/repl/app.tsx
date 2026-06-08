@@ -156,11 +156,16 @@ export function ReplApp({
         const sm = sessionManagerRef.current;
         await persistSessionMemory(engine.getMessages(), sm.sessionDir, sm.isEnabled);
         // Auto-memory extraction → write to memoryDir
-        if (sm.isEnabled) {
+        // Respect memory.autoMemoryEnabled, session.persistenceEnabled, cleanupPeriodDays
+        const memoryConfig = commandContext.config?.memory as { autoMemoryEnabled?: boolean } | undefined;
+        const autoMemoryEnabled = memoryConfig?.autoMemoryEnabled ?? true;
+        if (sm.isEnabled && autoMemoryEnabled && cleanupPeriodDays !== 0) {
           const memories = extractMemories(`user: ${query}\nassistant: ${responseText}`);
           if (memories.length > 0) {
+            // Priority: explicit config.memoryDir > project .slc/memory > user ~/.slc/memory
+            const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
             const memoryDir = (commandContext.config?.memoryDir as string)
-              ?? join(homedir(), ".slc", "memory");
+              ?? join(cwd, ".slc", "memory");
             await writeAutoMemories(memoryDir, memories, { enabled: true });
           }
         }
