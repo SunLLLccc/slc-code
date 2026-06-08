@@ -1,22 +1,46 @@
 // AgentTool — dispatch a subagent to handle a task
+// Child permissions are equal to or narrower than parent
 
 import type { Tool, ToolInput, ToolOutput, ToolContext } from "../base.js";
 import { buildTool } from "../base.js";
 import { QueryEngine } from "../../engine/engine.js";
 import type { Provider } from "../../engine/providers/base.js";
+import type { ToolRegistry } from "../registry.js";
+import type { PermissionChecker } from "../scheduler.js";
 import { createSidechainWriter } from "../../session/transcript.js";
 
 // ---------------------------------------------------------------------------
-// Provider registry — set by the session manager at startup
+// Provider/permission registry — set by the session manager at startup
 // ---------------------------------------------------------------------------
 
 let currentProvider: Provider | null = null;
-let sessionDir: string | null = null;
+let currentSessionDir: string | null = null;
+let parentToolRegistry: ToolRegistry | null = null;
+let parentPermissionChecker: PermissionChecker | null = null;
 
-/** Set the provider and session dir for subagent dispatch. */
-export function setAgentProvider(provider: Provider, dir: string): void {
-  currentProvider = provider;
-  sessionDir = dir;
+/**
+ * Set the provider, session dir, and permission context for subagent dispatch.
+ * Child agents inherit the parent's tool registry and permission checker,
+ * ensuring they cannot gain permissions the parent doesn't have.
+ */
+export function setAgentContext(ctx: {
+  provider: Provider;
+  sessionDir: string;
+  toolRegistry?: ToolRegistry;
+  permissionChecker?: PermissionChecker;
+}): void {
+  currentProvider = ctx.provider;
+  currentSessionDir = ctx.sessionDir;
+  parentToolRegistry = ctx.toolRegistry ?? null;
+  parentPermissionChecker = ctx.permissionChecker ?? null;
+}
+
+/** Reset agent context (for testing). */
+export function resetAgentContext(): void {
+  currentProvider = null;
+  currentSessionDir = null;
+  parentToolRegistry = null;
+  parentPermissionChecker = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,9 +93,13 @@ export const agentTool: Tool = buildTool({
     const subagentType = (input.subagentType as string | undefined) ?? "default";
 
     // 1. Create an isolated QueryEngine for the subagent
+    //    Child inherits parent's tool registry and permission checker (no new permissions)
     const subEngine = new QueryEngine(currentProvider, {
       maxTurns: 10,
       systemPrompt: `You are a subagent of type "${subagentType}". Complete the assigned task and return a concise summary.`,
+      toolRegistry: parentToolRegistry ?? undefined,
+      permissionChecker: parentPermissionChecker ?? undefined,
+      toolContext: { cwd: _context.cwd },
     });
 
     // 2. Run the prompt through the subagent
@@ -83,9 +111,9 @@ export const agentTool: Tool = buildTool({
     }
 
     // 3. Write subagent transcript to sidechain
-    if (sessionDir) {
+    if (currentSessionDir) {
       const subagentId = `agent-${Date.now()}`;
-      const writer = createSidechainWriter(sessionDir, subagentId);
+      const writer = createSidechainWriter(currentSessionDir, subagentId);
       await writer.append({
         uuid: crypto.randomUUID(),
         type: "user",

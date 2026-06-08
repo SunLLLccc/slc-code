@@ -188,8 +188,8 @@ describe("query()", () => {
     expect(doneEvents).toHaveLength(1);
   });
 
-  it("yields done with reason max_turns when maxTurns is 1 and provider never emits done", async () => {
-    // Provider loops without emitting done — maxTurns=1 should catch it.
+  it("yields done with reason completed when tool calls but no registry to execute", async () => {
+    // Provider emits tool_call_start but no registry → can't execute → completed
     let callCount = 0;
     const provider: Provider = {
       name: "looping",
@@ -214,7 +214,8 @@ describe("query()", () => {
 
     const doneEvents = events.filter(isDone);
     expect(doneEvents).toHaveLength(1);
-    expect(doneEvents[0].reason).toBe("max_turns");
+    // Tool calls but no registry → can't execute → completed
+    expect(doneEvents[0].reason).toBe("completed");
   });
 
   it("passes messages to provider", async () => {

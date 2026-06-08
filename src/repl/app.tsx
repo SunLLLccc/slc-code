@@ -13,6 +13,8 @@ import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 import { assembleSystemPrompt } from "../prompt/assembly.js";
 import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
 import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
+import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
+import { setAgentContext } from "../tools/builtin/agent.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -62,10 +64,22 @@ export function ReplApp({
 
     engineInitRef.current = sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
       const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
-      if (systemPrompt) {
-        engineRef.current = new QueryEngine(provider, { systemPrompt });
-      }
-    }).catch(() => { /* fallback: use default engine without system prompt */ });
+      const toolRegistry = createBuiltinRegistry();
+      const toolContext = { cwd };
+      engineRef.current = new QueryEngine(provider, {
+        ...(systemPrompt ? { systemPrompt } : undefined),
+        toolRegistry,
+        toolContext,
+      });
+      // Wire AgentTool with provider and permissions
+      setAgentContext({
+        provider,
+        sessionDir: sm.sessionDir ?? cwd,
+        toolRegistry,
+      });
+    }).catch(() => {
+      engineRef.current = new QueryEngine(provider);
+    });
 
     return () => {
       sm.close();
