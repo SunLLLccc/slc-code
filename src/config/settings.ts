@@ -40,6 +40,14 @@ export interface SessionSettings {
   cleanupPeriodDays?: number;
 }
 
+export interface McpServerSetting {
+  transport: "stdio" | "sse" | "http" | "ws";
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+}
+
 export interface SlcSettings {
   model?: string;
   providers?: {
@@ -51,6 +59,7 @@ export interface SlcSettings {
   sandbox?: SandboxSettings;
   memory?: MemorySettings;
   session?: SessionSettings;
+  mcpServers?: Record<string, McpServerSetting>;
 }
 
 /** Resolved runtime config after merging all layers. */

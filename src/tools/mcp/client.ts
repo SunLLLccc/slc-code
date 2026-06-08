@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { WebSocketClientTransport } from "@modelcontextprotocol/sdk/client/websocket.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 // ---------------------------------------------------------------------------
@@ -12,7 +13,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 export interface McpServerConfig {
   name: string;
-  transport: "stdio" | "sse" | "http";
+  transport: "stdio" | "sse" | "http" | "ws";
   command?: string;      // for stdio
   args?: string[];       // for stdio
   url?: string;          // for sse/http
@@ -36,6 +37,26 @@ export class McpError extends Error {
     super(message);
     this.name = "McpError";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Timeout helper
+// ---------------------------------------------------------------------------
+
+function timeoutPromise<T>(promise: Promise<T>, ms: number, serverName: string, operation: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new McpError(
+        `${operation} timed out after ${ms}ms for server "${serverName}"`,
+        serverName,
+      ));
+    }, ms);
+
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +108,15 @@ export class McpClient {
         }
         return new StreamableHTTPClientTransport(new URL(this.config.url));
       }
+      case "ws": {
+        if (!this.config.url) {
+          throw new McpError(
+            `"url" is required for ws transport`,
+            this.config.name,
+          );
+        }
+        return new WebSocketClientTransport(new URL(this.config.url));
+      }
       default:
         throw new McpError(
           `Unknown transport: ${this.config.transport}`,
@@ -96,7 +126,7 @@ export class McpClient {
   }
 
   /** Connect to the MCP server. */
-  async connect(): Promise<void> {
+  async connect(timeoutMs: number = 30_000): Promise<void> {
     if (this._connected) return;
 
     try {
@@ -105,7 +135,12 @@ export class McpClient {
         { name: "slc-code", version: "1.0.0" },
         { capabilities: {} },
       );
-      await this.client.connect(this.transport);
+      await timeoutPromise(
+        this.client.connect(this.transport),
+        timeoutMs,
+        this.config.name,
+        "connect",
+      );
       this._connected = true;
     } catch (err) {
       this._connected = false;
@@ -130,17 +165,39 @@ export class McpClient {
   }
 
   /** List all tools provided by the MCP server. */
-  async listTools(): Promise<McpTool[]> {
+  async listTools(timeoutMs: number = 30_000): Promise<McpTool[]> {
     this.assertConnected("listTools");
     try {
-      const result = await this.client!.listTools();
+      const result = await timeoutPromise(
+        this.client!.listTools(),
+        timeoutMs,
+        this.config.name,
+        "listTools",
+      );
       return result.tools.map((t) => ({
         name: t.name,
         description: t.description ?? "",
         inputSchema: t.inputSchema as Record<string, unknown>,
       }));
     } catch (err) {
-      throw this.wrapError(err, "listTools");
+      const mcpErr = this.wrapError(err, "listTools");
+      if (mcpErr.code === -32001) {
+        // Session expired — reconnect and retry once
+        await this.disconnect();
+        await this.connect(timeoutMs);
+        const result = await timeoutPromise(
+          this.client!.listTools(),
+          timeoutMs,
+          this.config.name,
+          "listTools",
+        );
+        return result.tools.map((t) => ({
+          name: t.name,
+          description: t.description ?? "",
+          inputSchema: t.inputSchema as Record<string, unknown>,
+        }));
+      }
+      throw mcpErr;
     }
   }
 
@@ -148,10 +205,16 @@ export class McpClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    timeoutMs: number = 60_000,
   ): Promise<{ content: string; isError?: boolean }> {
     this.assertConnected("callTool");
     try {
-      const result = await this.client!.callTool({ name, arguments: args });
+      const result = await timeoutPromise(
+        this.client!.callTool({ name, arguments: args }),
+        timeoutMs,
+        this.config.name,
+        `callTool(${name})`,
+      );
 
       // Extract text content from the result.
       // The result has a `content` array with typed items.
@@ -176,7 +239,36 @@ export class McpClient {
         isError: callResult.isError,
       };
     } catch (err) {
-      throw this.wrapError(err, `callTool(${name})`);
+      const mcpErr = this.wrapError(err, `callTool(${name})`);
+      if (mcpErr.code === -32001) {
+        // Session expired — reconnect and retry once
+        await this.disconnect();
+        await this.connect(timeoutMs);
+        const result = await timeoutPromise(
+          this.client!.callTool({ name, arguments: args }),
+          timeoutMs,
+          this.config.name,
+          `callTool(${name})`,
+        );
+        const callResult = result as {
+          content?: Array<{ type: string; text?: string }>;
+          isError?: boolean;
+        };
+        if (Array.isArray(callResult.content)) {
+          const texts = callResult.content
+            .filter((c) => c.type === "text" && typeof c.text === "string")
+            .map((c) => c.text as string);
+          return {
+            content: texts.join("\n") || JSON.stringify(callResult.content),
+            isError: callResult.isError,
+          };
+        }
+        return {
+          content: JSON.stringify(result),
+          isError: callResult.isError,
+        };
+      }
+      throw mcpErr;
     }
   }
 

@@ -11,6 +11,7 @@ import {
 import { McpAuthCache } from "../../src/tools/mcp/auth-cache.js";
 import { ConcurrencyLimiter } from "../../src/tools/mcp/concurrency.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
+import { loadMcpToolsIntoRegistry, disconnectAll } from "../../src/tools/mcp/loader.js";
 import { executeSkill } from "../../src/skills/executor.js";
 import type { Skill } from "../../src/skills/loader.js";
 
@@ -43,6 +44,15 @@ vi.mock("@modelcontextprotocol/sdk/client/sse.js", () => ({
 vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
   StreamableHTTPClientTransport: vi.fn(),
 }));
+
+vi.mock("@modelcontextprotocol/sdk/client/websocket.js", () => ({
+  WebSocketClientTransport: vi.fn(),
+}));
+
+// Shared mock client for adapter tests that only check properties (not execution)
+const dummyClient = {
+  callTool: vi.fn(),
+} as unknown as McpClient;
 
 // ---------------------------------------------------------------------------
 // McpClient
@@ -266,12 +276,12 @@ describe("adaptMcpTool", () => {
   };
 
   it("creates tool with correct normalized name format", () => {
-    const tool = adaptMcpTool(mcpTool, "my-server");
+    const tool = adaptMcpTool(mcpTool, "my-server", dummyClient);
     expect(tool.name).toBe("mcp__my-server__search");
   });
 
   it("tool has security attributes set correctly", () => {
-    const tool = adaptMcpTool(mcpTool, "server");
+    const tool = adaptMcpTool(mcpTool, "server", dummyClient);
     expect(tool.security).toEqual({
       readOnly: false,
       concurrencySafe: false,
@@ -305,12 +315,26 @@ describe("adaptMcpTool", () => {
     expect(result.isError).toBe(true);
   });
 
+  it("execute gates calls through ConcurrencyLimiter when provided", async () => {
+    const mockClient = {
+      callTool: vi.fn().mockResolvedValue({ content: "gated", isError: false }),
+    } as unknown as McpClient;
+    const limiter = new ConcurrencyLimiter(1);
+    const runSpy = vi.spyOn(limiter, "run");
+
+    const tool = adaptMcpTool(mcpTool, "server", mockClient, limiter);
+    const result = await tool.execute({ query: "test" }, { cwd: "/tmp" });
+
+    expect(runSpy).toHaveBeenCalledOnce();
+    expect(result.output).toBe("gated");
+  });
+
   it("description truncation is applied to long descriptions", () => {
     const longTool: McpTool = {
       ...mcpTool,
       description: "x".repeat(3000),
     };
-    const tool = adaptMcpTool(longTool, "server");
+    const tool = adaptMcpTool(longTool, "server", dummyClient);
     expect(tool.description.length).toBe(2048);
     expect(tool.description.endsWith("...")).toBe(true);
   });
@@ -530,6 +554,7 @@ describe("Builtin priority", () => {
     const mcpTool = adaptMcpTool(
       { name: "bash", description: "mcp bash", inputSchema: {} },
       "server",
+      dummyClient,
     );
 
     registry.registerBuiltin(builtinTool);
@@ -545,6 +570,7 @@ describe("Builtin priority", () => {
     const mcpTool = adaptMcpTool(
       { name: "search", description: "Search tool", inputSchema: {} },
       "my-server",
+      dummyClient,
     );
 
     registry.registerExternal(mcpTool);
@@ -625,5 +651,147 @@ describe("MCP skill shell interpolation", () => {
     expect(result).toContain("now");
     // Crucially, the shell command pattern is preserved literally
     expect(result).toBe("Run `!rm -rf /` now");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadMcpToolsIntoRegistry integration
+// ---------------------------------------------------------------------------
+
+describe("loadMcpToolsIntoRegistry", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockClose.mockResolvedValue(undefined);
+    mockListTools.mockResolvedValue({
+      tools: [
+        { name: "search", description: "Search", inputSchema: { type: "object", properties: {} } },
+        { name: "fetch", description: "Fetch", inputSchema: { type: "object", properties: {} } },
+      ],
+    });
+  });
+
+  afterEach(async () => {
+    await disconnectAll();
+  });
+
+  it("loads MCP tools into registry with mcp__server__tool naming", async () => {
+    const registry = new ToolRegistry();
+    const configs: McpServerConfig[] = [
+      { name: "my-server", transport: "stdio", command: "echo" },
+    ];
+
+    const result = await loadMcpToolsIntoRegistry(configs, registry);
+
+    expect(result.connected).toEqual(["my-server"]);
+    expect(result.failed).toEqual([]);
+
+    // Tools should be in registry with normalized names
+    expect(registry.has("mcp__my-server__search")).toBe(true);
+    expect(registry.has("mcp__my-server__fetch")).toBe(true);
+
+    // toProviderTools should include them
+    const providerTools = registry.toProviderTools();
+    const names = providerTools.map((t) => t.name);
+    expect(names).toContain("mcp__my-server__search");
+    expect(names).toContain("mcp__my-server__fetch");
+  });
+
+  it("connects once and reuses cached client for same server name", async () => {
+    const registry = new ToolRegistry();
+    const configs: McpServerConfig[] = [
+      { name: "cached-server", transport: "stdio", command: "echo" },
+    ];
+
+    // First load
+    await loadMcpToolsIntoRegistry(configs, registry);
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+
+    // Second load with same server name — should reuse client
+    await loadMcpToolsIntoRegistry(configs, registry);
+    // connect should still have been called only once (reused)
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips server when auth cache isBlocked returns true", async () => {
+    const registry = new ToolRegistry();
+    const authCache = new McpAuthCache();
+    authCache.markFailed("blocked-server");
+
+    const configs: McpServerConfig[] = [
+      { name: "blocked-server", transport: "stdio", command: "echo" },
+    ];
+
+    const result = await loadMcpToolsIntoRegistry(configs, registry, { authCache });
+
+    expect(result.connected).toEqual([]);
+    expect(result.failed).toEqual(["blocked-server"]);
+    expect(mockConnect).not.toHaveBeenCalled();
+  });
+
+  it("marks auth failure on session expiry error", async () => {
+    mockConnect.mockRejectedValueOnce(new Error("HTTP 404 Not Found"));
+
+    const registry = new ToolRegistry();
+    const authCache = new McpAuthCache();
+    const configs: McpServerConfig[] = [
+      { name: "expire-server", transport: "sse", url: "http://localhost:3000" },
+    ];
+
+    const result = await loadMcpToolsIntoRegistry(configs, registry, { authCache });
+
+    expect(result.connected).toEqual([]);
+    expect(result.failed).toEqual(["expire-server"]);
+    expect(authCache.isBlocked("expire-server")).toBe(true);
+  });
+
+  it("failed server is cleaned up from cache", async () => {
+    mockConnect.mockRejectedValueOnce(new Error("connection refused"));
+
+    const registry = new ToolRegistry();
+    const configs: McpServerConfig[] = [
+      { name: "fail-server", transport: "stdio", command: "bad" },
+    ];
+
+    const result = await loadMcpToolsIntoRegistry(configs, registry);
+    expect(result.failed).toEqual(["fail-server"]);
+
+    // Retry — should attempt to connect again (cache was cleared for failed server)
+    mockConnect.mockResolvedValueOnce(undefined);
+    mockListTools.mockResolvedValueOnce({ tools: [{ name: "t", description: "T", inputSchema: {} }] });
+    const result2 = await loadMcpToolsIntoRegistry(configs, registry);
+    expect(result2.connected).toEqual(["fail-server"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// McpClient ws transport
+// ---------------------------------------------------------------------------
+
+describe("McpClient ws transport", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockClose.mockResolvedValue(undefined);
+  });
+
+  it("ws transport creates WebSocketClientTransport", async () => {
+    const config: McpServerConfig = {
+      name: "ws-server",
+      transport: "ws",
+      url: "ws://localhost:8080",
+    };
+    const client = new McpClient(config);
+    await client.connect();
+    expect(client.isConnected()).toBe(true);
+  });
+
+  it("ws transport throws if url is missing", async () => {
+    const config: McpServerConfig = {
+      name: "ws-server",
+      transport: "ws",
+    };
+    const client = new McpClient(config);
+    await expect(client.connect()).rejects.toThrow(/url.*required.*ws/);
   });
 });

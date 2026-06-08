@@ -5,6 +5,7 @@ import type { McpServerConfig } from "./client.js";
 import { McpClient, McpError } from "./client.js";
 import { adaptMcpTool } from "./adapter.js";
 import { ConcurrencyLimiter } from "./concurrency.js";
+import type { McpAuthCache } from "./auth-cache.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -13,6 +14,35 @@ import { ConcurrencyLimiter } from "./concurrency.js";
 export interface LoadMcpToolsResult {
   connected: string[];
   failed: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Connection cache
+// ---------------------------------------------------------------------------
+
+const connectionCache = new Map<string, McpClient>();
+
+function cacheKey(config: McpServerConfig): string {
+  return config.name;
+}
+
+function getOrCreateClient(config: McpServerConfig): McpClient {
+  const key = cacheKey(config);
+  let client = connectionCache.get(key);
+  if (!client) {
+    client = new McpClient(config);
+    connectionCache.set(key, client);
+  }
+  return client;
+}
+
+/** Disconnect all cached clients and clear the cache. */
+export async function disconnectAll(): Promise<void> {
+  const disconnects = Array.from(connectionCache.values()).map((c) =>
+    c.disconnect().catch(() => {/* ignore */}),
+  );
+  await Promise.all(disconnects);
+  connectionCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -25,6 +55,7 @@ function defaultConcurrency(transport: string): number {
       return 3;
     case "sse":
     case "http":
+    case "ws":
       return 20;
     default:
       return 3;
@@ -45,34 +76,35 @@ function defaultConcurrency(transport: string): number {
 export async function loadMcpToolsIntoRegistry(
   configs: McpServerConfig[],
   registry: ToolRegistry,
-  options?: { concurrencyLimiter?: ConcurrencyLimiter },
+  options?: {
+    concurrencyLimiter?: ConcurrencyLimiter;
+    authCache?: McpAuthCache;
+  },
 ): Promise<LoadMcpToolsResult> {
   const result: LoadMcpToolsResult = { connected: [], failed: [] };
 
-  // Group configs by transport to choose appropriate concurrency limits
-  // Use the provided limiter or create one per transport type
-  const limiters = new Map<string, ConcurrencyLimiter>();
-
-  function getLimiter(transport: string): ConcurrencyLimiter {
-    if (options?.concurrencyLimiter) return options.concurrencyLimiter;
-    let limiter = limiters.get(transport);
-    if (!limiter) {
-      limiter = new ConcurrencyLimiter(defaultConcurrency(transport));
-      limiters.set(transport, limiter);
-    }
-    return limiter;
-  }
-
   const tasks = configs.map((config) =>
-    getLimiter(config.transport).run(async () => {
-      const client = new McpClient(config);
+    (async () => {
+      // Check auth cache — skip if server is blocked
+      if (options?.authCache?.isBlocked(config.name)) {
+        console.error(
+          `[mcp] Skipping "${config.name}" — auth failure block active`,
+        );
+        result.failed.push(config.name);
+        return;
+      }
+
+      const client = getOrCreateClient(config);
+      // Per-server concurrency limiter for tool calls
+      const toolLimiter = new ConcurrencyLimiter(defaultConcurrency(config.transport));
+
       try {
         await client.connect();
 
         const mcpTools = await client.listTools();
 
         for (const mcpTool of mcpTools) {
-          const tool = adaptMcpTool(mcpTool, config.name, client);
+          const tool = adaptMcpTool(mcpTool, config.name, client, toolLimiter);
           registry.registerExternal(tool);
         }
 
@@ -89,14 +121,21 @@ export async function loadMcpToolsIntoRegistry(
         );
         result.failed.push(config.name);
 
-        // Clean up on failure
+        // Record auth failure in cache
+        if (err instanceof McpError && err.code === -32001) {
+          options?.authCache?.markFailed(config.name);
+        }
+
+        // Remove from cache on failure so next attempt gets a fresh client
+        connectionCache.delete(cacheKey(config));
+        // Clean up the failed client
         try {
           await client.disconnect();
         } catch {
           // Ignore disconnect errors during cleanup
         }
       }
-    }),
+    })(),
   );
 
   await Promise.all(tasks);

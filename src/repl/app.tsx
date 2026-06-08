@@ -18,6 +18,9 @@ import { setAgentContext } from "../tools/builtin/agent.js";
 import { createPermissionChecker } from "../permissions/checker.js";
 import { parseRule, type PermissionRule } from "../permissions/rules.js";
 import { getPermissionRules } from "../commands/builtin/permissions.js";
+import { loadMcpToolsIntoRegistry, disconnectAll } from "../tools/mcp/loader.js";
+import type { McpServerConfig } from "../tools/mcp/client.js";
+import type { McpServerSetting } from "../config/settings.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -71,6 +74,16 @@ export function ReplApp({
     // Initialize tools and permissions FIRST (always available, even if prompt fails)
     const toolRegistry = createBuiltinRegistry();
     const toolContext = { cwd };
+    // Load MCP tools from config
+    const mcpServersConfig = commandContext.config?.mcpServers as Record<string, McpServerSetting> | undefined;
+    const mcpLoadPromise = mcpServersConfig
+      ? loadMcpToolsIntoRegistry(
+          Object.entries(mcpServersConfig).map(
+            ([name, setting]) => ({ name, ...setting } as McpServerConfig),
+          ),
+          toolRegistry,
+        ).catch(() => ({ connected: [], failed: [] }))
+      : Promise.resolve({ connected: [] as string[], failed: [] as string[] });
     const permissionsConfig = commandContext.config?.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
     const configRules: PermissionRule[] = [
       ...(permissionsConfig?.deny ?? []).map((r) => parseRule(r, "deny")),
@@ -86,8 +99,11 @@ export function ReplApp({
     toolRegistryRef.current = toolRegistry;
     permissionCheckerRef.current = permissionChecker;
 
-    // Then build system prompt (may fail — fallback only degrades prompt, not tools)
-    engineInitRef.current = sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
+    // Then build system prompt + load MCP tools (may fail — fallback only degrades prompt, not tools)
+    engineInitRef.current = Promise.all([
+      sm.cleanupAndInit(cleanupPeriodDays),
+      mcpLoadPromise,
+    ]).then(async () => {
       let systemPrompt: string | undefined;
       try {
         systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });

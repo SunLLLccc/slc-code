@@ -3,6 +3,7 @@
 import type { Tool, ToolOutput } from "../base.js";
 import type { McpTool } from "./client.js";
 import { McpClient } from "./client.js";
+import type { ConcurrencyLimiter } from "./concurrency.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,14 +35,23 @@ export function truncateDescription(
  * Convert an MCP tool definition into a P5 `Tool`.
  *
  * The returned tool's execute function calls the MCP server via the provided
- * client and returns the result.
+ * client and returns the result. If a ConcurrencyLimiter is provided, tool
+ * calls are gated through it.
  */
 export function adaptMcpTool(
   mcpTool: McpTool,
   serverName: string,
   client: McpClient,
+  limiter?: ConcurrencyLimiter,
 ): Tool {
   const toolName = normalizeMcpToolName(serverName, mcpTool.name);
+
+  const callServer = async (input: Record<string, unknown>) => {
+    if (limiter) {
+      return limiter.run(() => client.callTool(mcpTool.name, input));
+    }
+    return client.callTool(mcpTool.name, input);
+  };
 
   return {
     name: toolName,
@@ -56,10 +66,7 @@ export function adaptMcpTool(
     },
     async execute(input): Promise<ToolOutput> {
       try {
-        const result = await client.callTool(
-          mcpTool.name,
-          input as Record<string, unknown>,
-        );
+        const result = await callServer(input as Record<string, unknown>);
         return {
           output: result.content,
           isError: result.isError,
