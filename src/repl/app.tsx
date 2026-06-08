@@ -68,28 +68,32 @@ export function ReplApp({
     const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
     const userConfigDir = join(homedir(), ".slc");
 
+    // Initialize tools and permissions FIRST (always available, even if prompt fails)
+    const toolRegistry = createBuiltinRegistry();
+    const toolContext = { cwd };
+    const permissionsConfig = commandContext.config?.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
+    const configRules: PermissionRule[] = [
+      ...(permissionsConfig?.deny ?? []).map((r) => parseRule(r, "deny")),
+      ...(permissionsConfig?.ask ?? []).map((r) => parseRule(r, "ask")),
+      ...(permissionsConfig?.allow ?? []).map((r) => parseRule(r, "allow")),
+    ];
+    const permissionChecker = createPermissionChecker({
+      mode: (commandContext.config?.permissionMode as string as any) ?? "default",
+      rules: configRules,
+      projectRoot: cwd,
+      getRuntimeRules: () => getPermissionRules(),
+    });
+    toolRegistryRef.current = toolRegistry;
+    permissionCheckerRef.current = permissionChecker;
+
+    // Then build system prompt (may fail — fallback only degrades prompt, not tools)
     engineInitRef.current = sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
-      const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
-      const toolRegistry = createBuiltinRegistry();
-      const toolContext = { cwd };
-      // Build permission rules from config + runtime /permissions command
-      const permissionsConfig = commandContext.config?.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
-      const configRules: PermissionRule[] = [
-        ...(permissionsConfig?.deny ?? []).map((r) => parseRule(r, "deny")),
-        ...(permissionsConfig?.ask ?? []).map((r) => parseRule(r, "ask")),
-        ...(permissionsConfig?.allow ?? []).map((r) => parseRule(r, "allow")),
-      ];
-      // Merge with runtime /permissions rules
-      const runtimeRules = getPermissionRules();
-      const allRules = [...configRules, ...runtimeRules];
-      const permissionChecker = createPermissionChecker({
-        mode: (commandContext.config?.permissionMode as string as any) ?? "default",
-        rules: allRules,
-        projectRoot: cwd,
-      });
-      // Store refs for resume/rewind callbacks
-      toolRegistryRef.current = toolRegistry;
-      permissionCheckerRef.current = permissionChecker;
+      let systemPrompt: string | undefined;
+      try {
+        systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
+      } catch {
+        // Prompt assembly failed — continue without system prompt
+      }
       engineRef.current = new QueryEngine(provider, {
         ...(systemPrompt ? { systemPrompt } : undefined),
         tools: toolRegistry.toProviderTools(),
@@ -97,7 +101,6 @@ export function ReplApp({
         toolContext,
         permissionChecker,
       });
-      // Wire AgentTool with provider and permissions
       setAgentContext({
         provider,
         sessionDir: sm.sessionDir ?? cwd,
@@ -105,7 +108,13 @@ export function ReplApp({
         permissionChecker,
       });
     }).catch(() => {
-      engineRef.current = new QueryEngine(provider);
+      // Even if session init fails, create engine with tools
+      engineRef.current = new QueryEngine(provider, {
+        tools: toolRegistry.toProviderTools(),
+        toolRegistry,
+        toolContext,
+        permissionChecker,
+      });
     });
 
     return () => {

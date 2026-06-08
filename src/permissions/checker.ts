@@ -77,17 +77,24 @@ function buildNormalizedInput(
   return input;
 }
 
-export function createPermissionChecker(options: {
+export interface PermissionCheckerOptions {
   mode: PermissionMode;
+  /** Static rules (from config) */
   rules: PermissionRule[];
   projectRoot: string;
-}): PermissionChecker {
-  const { mode, rules, projectRoot } = options;
+  /**
+   * Dynamic rules provider — called on each check to get latest runtime rules.
+   * Merged with static rules: deny > ask > allow priority.
+   */
+  getRuntimeRules?: () => PermissionRule[];
+}
+
+export function createPermissionChecker(options: PermissionCheckerOptions): PermissionChecker {
+  const { mode, rules: configRules, projectRoot, getRuntimeRules } = options;
 
   return (tool: Tool, input: ToolInput, context: ToolContext) => {
     // 0. Project boundary enforcement for path-bearing tools
     if (PATH_TOOLS.has(tool.name) && typeof input.path === "string") {
-      // Resolve using context.cwd — same base as tool.execute
       const resolved = resolveToolPath(input.path, context.cwd);
       if (!isWithinProject(resolved, projectRoot)) {
         return "deny";
@@ -107,8 +114,12 @@ export function createPermissionChecker(options: {
     // Build normalized input with resolved paths for rule evaluation
     const normalizedInput = buildNormalizedInput(tool, input, context.cwd);
 
+    // Get latest runtime rules on each check (real-time /permissions updates)
+    const runtimeRules = getRuntimeRules?.() ?? [];
+    const allRules = [...configRules, ...runtimeRules];
+
     // 1. Explicit deny rules — highest priority
-    const ruleResult = evaluateRules(rules, tool.name, normalizedInput);
+    const ruleResult = evaluateRules(allRules, tool.name, normalizedInput);
     if (ruleResult === "deny") return "deny";
 
     // 2. Explicit ask rules
