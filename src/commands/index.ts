@@ -10,6 +10,7 @@ import { configCommand } from "./builtin/config.js";
 import { permissionsCommand } from "./builtin/permissions.js";
 import { diffCommand } from "./builtin/diff.js";
 import { costCommand } from "./builtin/cost.js";
+import { doctorCommand } from "./builtin/doctor.js";
 
 /**
  * Create a CommandRegistry with all builtin commands registered.
@@ -25,5 +26,6 @@ export function createDefaultRegistry(): CommandRegistry {
   registry.register(permissionsCommand);
   registry.register(diffCommand);
   registry.register(costCommand);
+  registry.register(doctorCommand);
   return registry;
 }
