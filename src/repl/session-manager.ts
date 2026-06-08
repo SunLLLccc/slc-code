@@ -42,11 +42,12 @@ export class SessionManager {
   /**
    * Switch to an existing session (e.g. after /resume).
    * Creates a new writer pointing to the resumed session dir.
+   * If disabled (bare mode), only updates runtime state — no writer created.
    */
   switchSession(sessionDir: string): void {
     this._sessionDir = sessionDir;
-    // Extract sessionId from dir name
     this._sessionId = sessionDir.split("/").pop() ?? sessionDir;
+    if (!this.enabled) return; // bare mode: no writer
     this.writer = new TranscriptWriter({
       sessionDir,
       enabled: true,

@@ -103,6 +103,19 @@ describe("SessionManager", () => {
     expect(existsSync(join(newDir, "transcript.jsonl"))).toBe(true);
   });
 
+  it("switchSession in bare mode updates sessionDir but no writer", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
+
+    // switchSession should update runtime state even in bare mode
+    const newDir = join(testDir, "resumed-session");
+    sm.switchSession(newDir);
+    expect(sm.sessionDir).toBe(newDir);
+
+    // But no writer is created — append should no-op
+    await sm.appendUserEvent("Should not write");
+    expect(existsSync(join(newDir, "transcript.jsonl"))).toBe(false);
+  });
+
   it("isEnabled reflects constructor option", () => {
     const enabled = new SessionManager({ sessionsBase: testDir, enabled: true });
     const disabled = new SessionManager({ sessionsBase: testDir, enabled: false });

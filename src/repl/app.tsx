@@ -2,6 +2,8 @@
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp } from "ink";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
 import type { StreamEvent } from "../engine/types.js";
@@ -40,17 +42,27 @@ export function ReplApp({
   const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
 
   // Session manager — tracks current session, writes transcript
+  // Read from config.session.persistenceEnabled (not config.persistenceEnabled)
+  const sessionConfig = commandContext.config?.session as { persistenceEnabled?: boolean; cleanupPeriodDays?: number } | undefined;
   const sessionsBase = (commandContext.config?.sessionsBase as string) ?? undefined;
-  const persistenceEnabled = (commandContext.config?.persistenceEnabled as boolean) ?? true;
+  const persistenceEnabled = sessionConfig?.persistenceEnabled ?? true;
+  const cleanupPeriodDays = sessionConfig?.cleanupPeriodDays ?? 30;
   const sessionManagerRef = useRef<SessionManager>(
     new SessionManager({ sessionsBase, enabled: persistenceEnabled }),
   );
 
-  // Initialize session on mount
+  // Initialize session on mount, cleanup expired sessions first
   useEffect(() => {
-    sessionManagerRef.current.initSession();
+    const sm = sessionManagerRef.current;
+    // Cleanup expired sessions before initializing new one
+    if (sm.isEnabled) {
+      import("../session/cleanup.js").then(({ cleanupSessions }) => {
+        cleanupSessions({ sessionsBase: sessionsBase ?? join(homedir(), ".slc", "sessions"), cleanupPeriodDays });
+      }).catch(() => { /* best-effort */ });
+    }
+    sm.initSession();
     return () => {
-      sessionManagerRef.current.close();
+      sm.close();
     };
   }, []);
 
