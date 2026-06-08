@@ -75,6 +75,9 @@ export function ReplApp({
         clearConversation: () => {
           engineRef.current.reset();
         },
+        compactMessages: () => {
+          engineRef.current.compact();
+        },
         resumeSession: createResumeSession(engineRef.current, sm, sessionsBase),
         rewindToEvent: createRewindToEvent(engineRef.current, sm, sessionsBase),
         config: {
