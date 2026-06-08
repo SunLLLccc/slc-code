@@ -31,11 +31,12 @@ export interface NonInteractiveResult {
 export async function executePrint(
   provider: Provider,
   query: string,
-  options?: { signal?: AbortSignal; cwd?: string; userConfigDir?: string },
+  options?: { signal?: AbortSignal; cwd?: string; userConfigDir?: string; skipPromptAssembly?: boolean },
 ): Promise<NonInteractiveResult> {
   const systemPrompt = await assembleSystemPrompt({
     cwd: options?.cwd,
     userConfigDir: options?.userConfigDir,
+    skip: options?.skipPromptAssembly,
   });
   const engine = new QueryEngine(provider, systemPrompt ? { systemPrompt } : undefined);
   const events: StreamEvent[] = [];
@@ -69,7 +70,7 @@ export async function executePrint(
  */
 export async function executeStdin(
   provider: Provider,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; cwd?: string; userConfigDir?: string; skipPromptAssembly?: boolean },
 ): Promise<NonInteractiveResult> {
   const query = await readStdin();
   if (!query.trim()) {

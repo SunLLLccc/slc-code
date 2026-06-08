@@ -12,6 +12,8 @@ import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 import { assembleSystemPrompt } from "../prompt/assembly.js";
 import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
+import { extractMemories } from "../memory/auto-memory.js";
+import { writeAutoMemories } from "../memory/auto-memory-store.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -153,6 +155,15 @@ export function ReplApp({
         // Persist session memory if threshold reached
         const sm = sessionManagerRef.current;
         await persistSessionMemory(engine.getMessages(), sm.sessionDir, sm.isEnabled);
+        // Auto-memory extraction → write to memoryDir
+        if (sm.isEnabled) {
+          const memories = extractMemories(`user: ${query}\nassistant: ${responseText}`);
+          if (memories.length > 0) {
+            const memoryDir = (commandContext.config?.memoryDir as string)
+              ?? join(homedir(), ".slc", "memory");
+            await writeAutoMemories(memoryDir, memories, { enabled: true });
+          }
+        }
       }
     } catch (e) {
       addOutput(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
