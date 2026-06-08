@@ -39,6 +39,7 @@ export type ProviderMessage =
 export type StreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_call_start"; id: string; name: string }
+  | { type: "tool_call_args"; id: string; args_json: string }
   | { type: "tool_call_result"; id: string; result: string; isError?: boolean }
   | { type: "thinking_delta"; text: string }
   | { type: "error"; error: Error }

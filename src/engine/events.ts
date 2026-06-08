@@ -20,6 +20,12 @@ export function isToolCallResult(
   return event.type === "tool_call_result";
 }
 
+export function isToolCallArgs(
+  event: StreamEvent,
+): event is Extract<StreamEvent, { type: "tool_call_args" }> {
+  return event.type === "tool_call_args";
+}
+
 export function isThinkingDelta(
   event: StreamEvent,
 ): event is Extract<StreamEvent, { type: "thinking_delta" }> {
