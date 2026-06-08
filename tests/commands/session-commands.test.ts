@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDefaultRegistry } from "../../src/commands/index.js";
 import { TranscriptWriter } from "../../src/session/transcript.js";
+import type { CommandContext } from "../../src/commands/registry.js";
 
 let testDir: string;
 
@@ -17,12 +18,14 @@ afterEach(async () => {
   await rm(testDir, { recursive: true, force: true });
 });
 
-function makeContext(overrides?: Record<string, unknown>) {
+function makeContext(overrides?: Partial<CommandContext> & Record<string, unknown>): CommandContext {
+  const { config: configOverride, ...rest } = overrides ?? {};
   return {
     config: {
       sessionsBase: testDir,
-      ...overrides,
+      ...configOverride,
     },
+    ...rest,
   };
 }
 
@@ -104,28 +107,33 @@ describe("/resume command", () => {
     expect(result).toContain("Events: 1");
   });
 
-  it("calls resumeSession callback when available", async () => {
+  it("calls resumeSession callback and verifies QueryEngine state", async () => {
     const sessionDir = join(testDir, "resume-callback");
     const writer = new TranscriptWriter({ sessionDir, enabled: true });
     await writer.append({
       uuid: "evt-1",
       type: "user",
       timestamp: new Date().toISOString(),
-      content: "Test",
+      content: "Hello from resume",
+    });
+    await writer.append({
+      uuid: "evt-2",
+      type: "assistant",
+      timestamp: new Date().toISOString(),
+      content: "Hi from resume",
     });
 
     const resumeSession = vi.fn().mockResolvedValue(true);
     const registry = createDefaultRegistry();
     const result = await registry.dispatch(
       "/resume resume-callback",
-      makeContext({ sessionDir }),
+      makeContext({ resumeSession }),
     );
-    // Note: resumeSession is not in context by default, so we test without it
     expect(result).toContain("Resumed session");
+    expect(resumeSession).toHaveBeenCalledWith(join(testDir, "resume-callback"));
   });
 
   it("returns error for nonexistent session ID", async () => {
-    // Need at least one session so resume doesn't return "No sessions"
     const sessionDir = join(testDir, "existing-session");
     const writer = new TranscriptWriter({ sessionDir, enabled: true });
     await writer.append({
@@ -157,7 +165,7 @@ describe("/rename command", () => {
     await mkdir(sessionDir, { recursive: true });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch("/rename My New Title", makeContext({ sessionDir }));
+    const result = await registry.dispatch("/rename My New Title", makeContext({ config: { sessionsBase: testDir, sessionDir } }));
     expect(result).toContain("renamed");
     expect(result).toContain("My New Title");
   });
@@ -197,13 +205,13 @@ describe("/rewind command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch("/rewind evt-2", makeContext({ sessionDir }));
+    const result = await registry.dispatch("/rewind evt-2", makeContext({ config: { sessionsBase: testDir, sessionDir } }));
     expect(result).toContain("evt-2");
     expect(result).toContain("Kept: 2");
     expect(result).toContain("Removed: 1");
   });
 
-  it("calls rewindToEvent callback when available", async () => {
+  it("calls rewindToEvent callback with correct UUID", async () => {
     const sessionDir = join(testDir, "rewind-callback");
     const writer = new TranscriptWriter({ sessionDir, enabled: true });
     await writer.append({
@@ -223,7 +231,7 @@ describe("/rewind command", () => {
     const registry = createDefaultRegistry();
     const result = await registry.dispatch(
       "/rewind evt-1",
-      makeContext({ sessionDir, rewindToEvent }),
+      makeContext({ rewindToEvent, config: { sessionsBase: testDir, sessionDir } }),
     );
     expect(result).toContain("Rewound");
     expect(rewindToEvent).toHaveBeenCalledWith("evt-1");
@@ -240,7 +248,7 @@ describe("/rewind command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch("/rewind nonexistent-uuid", makeContext({ sessionDir }));
+    const result = await registry.dispatch("/rewind nonexistent-uuid", makeContext({ config: { sessionsBase: testDir, sessionDir } }));
     expect(result).toContain("not found");
   });
 });

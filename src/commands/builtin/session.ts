@@ -1,10 +1,10 @@
-// /session — list available sessions
+// /session — list available sessions (uses lite reader for large transcripts)
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { Command, CommandContext } from "../registry.js";
-import { getAvailableSessions, getSessionMetadata } from "../../session/resume.js";
+import { getAvailableSessions, getSessionMetadataLite } from "../../session/resume.js";
 
 const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
@@ -25,7 +25,8 @@ export const sessionCommand: Command = {
     for (let i = 0; i < sessions.length; i++) {
       const sessionId = sessions[i]!;
       const sessionDir = join(sessionsBase, sessionId);
-      const meta = await getSessionMetadata(sessionDir);
+      // Use lite reader — only reads head/tail 64KB, not full transcript
+      const meta = await getSessionMetadataLite(sessionDir);
 
       if (meta) {
         const date = new Date(meta.lastModified).toLocaleString();

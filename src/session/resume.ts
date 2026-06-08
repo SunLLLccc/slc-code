@@ -132,6 +132,7 @@ export async function getSessionMetadataLite(
 
 /**
  * Read a window of bytes from a file and parse JSONL events from it.
+ * Discards first and last lines if they may be incomplete (window boundaries).
  */
 async function readWindow(
   filePath: string,
@@ -144,7 +145,15 @@ async function readWindow(
       const buffer = Buffer.alloc(length);
       const { bytesRead } = await fh.read(buffer, 0, length, offset);
       const content = buffer.subarray(0, bytesRead).toString("utf-8");
-      return parseTranscriptContent(content, filePath).events;
+      const lines = content.split("\n");
+
+      // Discard first line if we're not at the start (may be incomplete)
+      const start = offset > 0 ? 1 : 0;
+      // Discard last line if the window doesn't end at a newline (may be incomplete)
+      const end = content.endsWith("\n") ? lines.length : lines.length - 1;
+
+      const trimmed = lines.slice(start, end).join("\n");
+      return parseTranscriptContent(trimmed, filePath).events;
     } finally {
       await fh.close();
     }

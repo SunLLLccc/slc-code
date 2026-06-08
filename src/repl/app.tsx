@@ -6,6 +6,7 @@ import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
 import type { StreamEvent } from "../engine/types.js";
 import type { CommandRegistry, CommandContext } from "../commands/registry.js";
+import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -43,6 +44,9 @@ export function ReplApp({
 
   const handleCommand = useCallback(
     async (cmd: string): Promise<boolean> => {
+      const sessionsBase = (commandContext.config?.sessionsBase as string) ?? undefined;
+      const sessionDir = (commandContext.config?.sessionDir as string) ?? undefined;
+
       const ctx: CommandContext = {
         ...commandContext,
         model: currentModel,
@@ -52,6 +56,8 @@ export function ReplApp({
         clearConversation: () => {
           engineRef.current.reset();
         },
+        resumeSession: createResumeSession(engineRef.current, sessionsBase),
+        rewindToEvent: createRewindToEvent(engineRef.current, sessionDir, sessionsBase),
       };
 
       const result = await commandRegistry.dispatch(cmd, ctx);
