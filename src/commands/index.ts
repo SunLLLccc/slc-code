@@ -11,6 +11,10 @@ import { permissionsCommand } from "./builtin/permissions.js";
 import { diffCommand } from "./builtin/diff.js";
 import { costCommand } from "./builtin/cost.js";
 import { doctorCommand } from "./builtin/doctor.js";
+import { resumeCommand } from "./builtin/resume.js";
+import { sessionCommand } from "./builtin/session.js";
+import { renameCommand } from "./builtin/rename.js";
+import { rewindCommand } from "./builtin/rewind.js";
 
 /**
  * Create a CommandRegistry with all builtin commands registered.
@@ -27,5 +31,10 @@ export function createDefaultRegistry(): CommandRegistry {
   registry.register(diffCommand);
   registry.register(costCommand);
   registry.register(doctorCommand);
+  // Phase 3
+  registry.register(resumeCommand);
+  registry.register(sessionCommand);
+  registry.register(renameCommand);
+  registry.register(rewindCommand);
   return registry;
 }
