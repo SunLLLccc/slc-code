@@ -164,25 +164,152 @@ describe("AgentTool sidechain", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Permission inheritance
+// Permission inheritance — real tool call blocking
 // ---------------------------------------------------------------------------
 
 describe("AgentTool permission inheritance", () => {
-  it("child inherits parent permissionChecker", async () => {
-    // Create a permission checker that denies everything
+  it("child tool call denied by parent permissionChecker", async () => {
+    let toolExecuted = false;
+
+    // Provider that emits a tool call in round 1, then final text in round 2
+    let round = 0;
+    const toolCallProvider: Provider = {
+      name: "tool-calling-sub",
+      capabilities: { toolUse: true, streaming: true, vision: false, promptCache: false, extendedThinking: false },
+      defaultModel: "test",
+      async *chat() {
+        round++;
+        if (round === 1) {
+          yield { type: "tool_call_start" as const, id: "tc-child-1", name: "DangerousTool" };
+          yield { type: "tool_call_args" as const, id: "tc-child-1", args_json: '{"action":"delete"}' };
+        } else {
+          yield { type: "text_delta" as const, text: "Tool was blocked" };
+          yield { type: "done" as const, reason: "completed" as const };
+        }
+      },
+    };
+
+    // Create a registry with a tool that records execution
+    const { ToolRegistry } = await import("../../src/tools/registry.js");
+    const { buildTool } = await import("../../src/tools/base.js");
+    const registry = new ToolRegistry();
+    registry.registerBuiltin(buildTool({
+      name: "DangerousTool",
+      description: "A dangerous tool",
+      schema: { input: { type: "object", properties: { action: { type: "string" } } } },
+      security: { readOnly: false, concurrencySafe: false, destructive: true },
+      execute: async () => { toolExecuted = true; return { output: "destroyed" }; },
+    }));
+
+    // Parent permission checker denies everything
     const denyAll: PermissionChecker = () => "deny";
 
     setAgentContext({
-      provider: makeMockProvider("should not reach tool execution"),
+      provider: toolCallProvider,
       sessionDir: testDir,
+      toolRegistry: registry,
       permissionChecker: denyAll,
     });
 
-    // The child agent itself can still run (checkPermissions returns "allow" for AgentTool)
-    // but any tools the child tries to use would be denied by the inherited checker
-    const result = await agentTool.execute({ prompt: "try to use tools" }, { cwd: "/tmp" });
-    // The subagent still returns text even if tools are denied
-    expect(result.output).toBeDefined();
+    const result = await agentTool.execute({ prompt: "run dangerous tool" }, { cwd: "/tmp" });
+
+    // Tool should NOT have been executed
+    expect(toolExecuted).toBe(false);
+    // Subagent should still return some text (from round 2)
+    expect(result.output).toContain("Tool was blocked");
+  });
+
+  it("child tool call allowed by parent permissionChecker", async () => {
+    let toolExecuted = false;
+
+    let round = 0;
+    const toolCallProvider: Provider = {
+      name: "tool-calling-sub-allow",
+      capabilities: { toolUse: true, streaming: true, vision: false, promptCache: false, extendedThinking: false },
+      defaultModel: "test",
+      async *chat() {
+        round++;
+        if (round === 1) {
+          yield { type: "tool_call_start" as const, id: "tc-child-2", name: "SafeTool" };
+          yield { type: "tool_call_args" as const, id: "tc-child-2", args_json: '{"query":"test"}' };
+        } else {
+          yield { type: "text_delta" as const, text: "Tool executed successfully" };
+          yield { type: "done" as const, reason: "completed" as const };
+        }
+      },
+    };
+
+    const { ToolRegistry } = await import("../../src/tools/registry.js");
+    const { buildTool } = await import("../../src/tools/base.js");
+    const registry = new ToolRegistry();
+    registry.registerBuiltin(buildTool({
+      name: "SafeTool",
+      description: "A safe tool",
+      schema: { input: { type: "object", properties: { query: { type: "string" } } } },
+      security: { readOnly: true, concurrencySafe: true, destructive: false },
+      execute: async () => { toolExecuted = true; return { output: "result" }; },
+    }));
+
+    // Parent permission checker allows everything
+    const allowAll: PermissionChecker = () => "allow";
+
+    setAgentContext({
+      provider: toolCallProvider,
+      sessionDir: testDir,
+      toolRegistry: registry,
+      permissionChecker: allowAll,
+    });
+
+    const result = await agentTool.execute({ prompt: "run safe tool" }, { cwd: "/tmp" });
+
+    // Tool SHOULD have been executed
+    expect(toolExecuted).toBe(true);
+    expect(result.output).toContain("Tool executed successfully");
+  });
+
+  it("parent toolRegistry tools are declared to child provider", async () => {
+    let receivedTools: Array<{ name: string }> = [];
+
+    const spyProvider: Provider = {
+      name: "spy-sub",
+      capabilities: { toolUse: true, streaming: true, vision: false, promptCache: false, extendedThinking: false },
+      defaultModel: "test",
+      async *chat(_messages, tools) {
+        receivedTools = [...tools];
+        yield { type: "text_delta" as const, text: "spied" };
+        yield { type: "done" as const, reason: "completed" as const };
+      },
+    };
+
+    const { ToolRegistry } = await import("../../src/tools/registry.js");
+    const { buildTool } = await import("../../src/tools/base.js");
+    const registry = new ToolRegistry();
+    registry.registerBuiltin(buildTool({
+      name: "ToolA",
+      description: "A",
+      schema: { input: { type: "object" } },
+      security: { readOnly: true, concurrencySafe: true, destructive: false },
+      execute: async () => ({ output: "a" }),
+    }));
+    registry.registerBuiltin(buildTool({
+      name: "ToolB",
+      description: "B",
+      schema: { input: { type: "object" } },
+      security: { readOnly: true, concurrencySafe: true, destructive: false },
+      execute: async () => ({ output: "b" }),
+    }));
+
+    setAgentContext({
+      provider: spyProvider,
+      sessionDir: testDir,
+      toolRegistry: registry,
+    });
+
+    await agentTool.execute({ prompt: "check tools" }, { cwd: "/tmp" });
+
+    // Child provider should have received parent's tool declarations
+    expect(receivedTools.map((t) => t.name)).toContain("ToolA");
+    expect(receivedTools.map((t) => t.name)).toContain("ToolB");
   });
 });
 

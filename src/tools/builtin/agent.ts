@@ -97,6 +97,7 @@ export const agentTool: Tool = buildTool({
     const subEngine = new QueryEngine(currentProvider, {
       maxTurns: 10,
       systemPrompt: `You are a subagent of type "${subagentType}". Complete the assigned task and return a concise summary.`,
+      tools: parentToolRegistry ? parentToolRegistry.toProviderTools() : undefined,
       toolRegistry: parentToolRegistry ?? undefined,
       permissionChecker: parentPermissionChecker ?? undefined,
       toolContext: { cwd: _context.cwd },
