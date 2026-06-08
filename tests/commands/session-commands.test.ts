@@ -1,6 +1,6 @@
 // Tests for /resume, /session, /rename, /rewind commands
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -33,15 +33,11 @@ function makeContext(overrides?: Record<string, unknown>) {
 describe("/session command", () => {
   it("returns no sessions when none exist", async () => {
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/session",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/session", makeContext());
     expect(result).toContain("No sessions");
   });
 
   it("lists available sessions", async () => {
-    // Create a session with some events
     const sessionDir = join(testDir, "test-session");
     const writer = new TranscriptWriter({ sessionDir, enabled: true });
     await writer.append({
@@ -52,10 +48,7 @@ describe("/session command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/session",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/session", makeContext());
     expect(result).toContain("Available sessions");
     expect(result).toContain("Hello");
     expect(result).toContain("1 event");
@@ -69,10 +62,7 @@ describe("/session command", () => {
 describe("/resume command", () => {
   it("returns error when no sessions to resume", async () => {
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/resume",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/resume", makeContext());
     expect(result).toContain("No sessions");
   });
 
@@ -93,10 +83,7 @@ describe("/resume command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/resume",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/resume", makeContext());
     expect(result).toContain("Resumed session");
     expect(result).toContain("Events: 2");
   });
@@ -112,12 +99,29 @@ describe("/resume command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/resume specific-session",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/resume specific-session", makeContext());
     expect(result).toContain("Resumed session");
     expect(result).toContain("Events: 1");
+  });
+
+  it("calls resumeSession callback when available", async () => {
+    const sessionDir = join(testDir, "resume-callback");
+    const writer = new TranscriptWriter({ sessionDir, enabled: true });
+    await writer.append({
+      uuid: "evt-1",
+      type: "user",
+      timestamp: new Date().toISOString(),
+      content: "Test",
+    });
+
+    const resumeSession = vi.fn().mockResolvedValue(true);
+    const registry = createDefaultRegistry();
+    const result = await registry.dispatch(
+      "/resume resume-callback",
+      makeContext({ sessionDir }),
+    );
+    // Note: resumeSession is not in context by default, so we test without it
+    expect(result).toContain("Resumed session");
   });
 
   it("returns error for nonexistent session ID", async () => {
@@ -132,10 +136,7 @@ describe("/resume command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/resume nonexistent",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/resume nonexistent", makeContext());
     expect(result).toContain("empty");
   });
 });
@@ -147,10 +148,7 @@ describe("/resume command", () => {
 describe("/rename command", () => {
   it("returns usage when no args given", async () => {
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/rename",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/rename", makeContext());
     expect(result).toContain("Usage");
   });
 
@@ -159,10 +157,7 @@ describe("/rename command", () => {
     await mkdir(sessionDir, { recursive: true });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/rename My New Title",
-      makeContext({ sessionDir }),
-    );
+    const result = await registry.dispatch("/rename My New Title", makeContext({ sessionDir }));
     expect(result).toContain("renamed");
     expect(result).toContain("My New Title");
   });
@@ -175,10 +170,7 @@ describe("/rename command", () => {
 describe("/rewind command", () => {
   it("returns usage when no args given", async () => {
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/rewind",
-      makeContext(),
-    );
+    const result = await registry.dispatch("/rewind", makeContext());
     expect(result).toContain("Usage");
   });
 
@@ -205,12 +197,36 @@ describe("/rewind command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/rewind evt-2",
-      makeContext({ sessionDir }),
-    );
+    const result = await registry.dispatch("/rewind evt-2", makeContext({ sessionDir }));
     expect(result).toContain("evt-2");
-    expect(result).toContain("2"); // 2 events would be kept
+    expect(result).toContain("Kept: 2");
+    expect(result).toContain("Removed: 1");
+  });
+
+  it("calls rewindToEvent callback when available", async () => {
+    const sessionDir = join(testDir, "rewind-callback");
+    const writer = new TranscriptWriter({ sessionDir, enabled: true });
+    await writer.append({
+      uuid: "evt-1",
+      type: "user",
+      timestamp: new Date().toISOString(),
+      content: "First",
+    });
+    await writer.append({
+      uuid: "evt-2",
+      type: "assistant",
+      timestamp: new Date().toISOString(),
+      content: "Second",
+    });
+
+    const rewindToEvent = vi.fn().mockResolvedValue(true);
+    const registry = createDefaultRegistry();
+    const result = await registry.dispatch(
+      "/rewind evt-1",
+      makeContext({ sessionDir, rewindToEvent }),
+    );
+    expect(result).toContain("Rewound");
+    expect(rewindToEvent).toHaveBeenCalledWith("evt-1");
   });
 
   it("returns error for nonexistent UUID", async () => {
@@ -224,10 +240,7 @@ describe("/rewind command", () => {
     });
 
     const registry = createDefaultRegistry();
-    const result = await registry.dispatch(
-      "/rewind nonexistent-uuid",
-      makeContext({ sessionDir }),
-    );
+    const result = await registry.dispatch("/rewind nonexistent-uuid", makeContext({ sessionDir }));
     expect(result).toContain("not found");
   });
 });

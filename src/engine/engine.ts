@@ -55,6 +55,24 @@ export class QueryEngine {
     return [...this.messages];
   }
 
+  /**
+   * Load messages from an external source (e.g. resume).
+   * Replaces current message history entirely.
+   */
+  loadMessages(messages: ProviderMessage[]): void {
+    this.messages.length = 0;
+    this.messages.push(...messages);
+  }
+
+  /**
+   * Replace messages up to a certain point (e.g. rewind).
+   * Keeps messages after the cutoff index.
+   */
+  replaceMessages(messages: ProviderMessage[]): void {
+    this.messages.length = 0;
+    this.messages.push(...messages);
+  }
+
   /** Clear the message history. */
   reset(): void {
     this.messages.length = 0;

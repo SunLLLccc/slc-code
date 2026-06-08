@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { Command, CommandContext } from "../registry.js";
-import { loadTranscript, getAvailableSessions } from "../../session/resume.js";
+import { loadTranscript, getAvailableSessions, rebuildSessionState } from "../../session/resume.js";
 
 const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
@@ -42,6 +42,14 @@ export const resumeCommand: Command = {
           ? event.content.slice(0, 80) + "..."
           : event.content;
         break;
+      }
+    }
+
+    // Restore runtime state via callback
+    if (context.resumeSession) {
+      const restored = await context.resumeSession(sessionDir);
+      if (!restored) {
+        return `Resumed session "${sessionId}" but failed to restore runtime state.`;
       }
     }
 

@@ -29,6 +29,16 @@ export interface CommandContext {
   costSummary?: () => string;
   /** Current configuration (read-only snapshot). */
   config?: Record<string, unknown>;
+  /**
+   * Resume a session: load transcript events into QueryEngine.
+   * Called by /resume command to restore runtime state.
+   */
+  resumeSession?: (sessionDir: string) => Promise<boolean>;
+  /**
+   * Rewind to a specific event UUID: truncate QueryEngine history.
+   * Called by /rewind command to restore to a previous state.
+   */
+  rewindToEvent?: (uuid: string) => Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------

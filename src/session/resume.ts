@@ -1,8 +1,9 @@
 // Resume loading — read and query session transcripts
 
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat, open } from "node:fs/promises";
 import { join } from "node:path";
 import type { TranscriptEvent } from "./transcript.js";
+import { isTranscriptEventType } from "./transcript.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,13 +25,20 @@ export interface SessionMetadata {
 }
 
 // ---------------------------------------------------------------------------
-// loadTranscript
+// Lite reader constants — PRD 14.4
+// ---------------------------------------------------------------------------
+
+const LITE_WINDOW_BYTES = 64 * 1024; // 64KB head/tail window
+
+// ---------------------------------------------------------------------------
+// loadTranscript — full read (for resume)
 // ---------------------------------------------------------------------------
 
 /**
  * Read transcript.jsonl from a session directory and parse each line.
  * Returns an empty events array for missing or empty files.
  * Malformed lines are skipped with a console warning.
+ * Only events with valid transcript types are included.
  */
 export async function loadTranscript(sessionDir: string): Promise<ResumeResult> {
   const filePath = join(sessionDir, "transcript.jsonl");
@@ -53,22 +61,160 @@ export async function loadTranscript(sessionDir: string): Promise<ResumeResult> 
     return { success: true, events: [] };
   }
 
-  const lines = content.split("\n");
-  const events: TranscriptEvent[] = [];
+  return parseTranscriptContent(content, filePath);
+}
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || line.trim() === "") continue;
+// ---------------------------------------------------------------------------
+// Lite metadata reader — PRD 14.4 (head/tail 64KB only)
+// ---------------------------------------------------------------------------
 
-    try {
-      const parsed = JSON.parse(line) as TranscriptEvent;
-      events.push(parsed);
-    } catch {
-      console.warn(`Skipping malformed transcript line ${i + 1} in ${filePath}`);
+/**
+ * Read only the head and tail of transcript.jsonl (64KB each) for metadata.
+ * Does NOT read the entire file — suitable for /session listing.
+ */
+export async function getSessionMetadataLite(
+  sessionDir: string,
+): Promise<SessionMetadata | null> {
+  const filePath = join(sessionDir, "transcript.jsonl");
+
+  let fileStat;
+  try {
+    fileStat = await stat(filePath);
+  } catch (err: unknown) {
+    if (isEnoent(err)) return null;
+    return null;
+  }
+
+  const fileSize = fileStat.size;
+
+  if (fileSize === 0) {
+    return { title: "Empty session", eventCount: 0, lastModified: fileStat.mtime.toISOString() };
+  }
+
+  // For small files, just read everything
+  if (fileSize <= LITE_WINDOW_BYTES * 2) {
+    const result = await loadTranscript(sessionDir);
+    if (!result.success) return null;
+    return extractMetadata(result.events, fileStat.mtime.toISOString());
+  }
+
+  // Read head window
+  const headEvents = await readWindow(filePath, 0, LITE_WINDOW_BYTES);
+
+  // Read tail window
+  const tailStart = Math.max(0, fileSize - LITE_WINDOW_BYTES);
+  const tailEvents = await readWindow(filePath, tailStart, LITE_WINDOW_BYTES);
+
+  // Title from head, event count estimated from tail UUID (rough count)
+  let title = "Untitled session";
+  for (const event of headEvents) {
+    if (event.type === "user" && event.content) {
+      title = event.content.length > 120
+        ? event.content.slice(0, 120) + "..."
+        : event.content;
+      break;
     }
   }
 
-  return { success: true, events };
+  // Estimate event count from total file size and average event size
+  const sampleEvents = [...headEvents, ...tailEvents];
+  const avgEventSize = sampleEvents.length > 0
+    ? sampleEvents.reduce((sum, e) => sum + JSON.stringify(e).length + 1, 0) / sampleEvents.length
+    : 200;
+  const estimatedCount = Math.max(1, Math.round(fileSize / avgEventSize));
+
+  return {
+    title,
+    eventCount: estimatedCount,
+    lastModified: fileStat.mtime.toISOString(),
+  };
+}
+
+/**
+ * Read a window of bytes from a file and parse JSONL events from it.
+ */
+async function readWindow(
+  filePath: string,
+  offset: number,
+  length: number,
+): Promise<TranscriptEvent[]> {
+  try {
+    const fh = await open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await fh.read(buffer, 0, length, offset);
+      const content = buffer.subarray(0, bytesRead).toString("utf-8");
+      return parseTranscriptContent(content, filePath).events;
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// getSessionMetadata — full metadata (uses loadTranscript)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read metadata from a session directory using full transcript read.
+ * For /session listing, prefer getSessionMetadataLite instead.
+ */
+export async function getSessionMetadata(
+  sessionDir: string,
+): Promise<SessionMetadata | null> {
+  const filePath = join(sessionDir, "transcript.jsonl");
+
+  let fileStat;
+  try {
+    fileStat = await stat(filePath);
+  } catch (err: unknown) {
+    if (isEnoent(err)) return null;
+    return null;
+  }
+
+  const result = await loadTranscript(sessionDir);
+  if (!result.success) return null;
+
+  return extractMetadata(result.events, fileStat.mtime.toISOString());
+}
+
+// ---------------------------------------------------------------------------
+// rebuildSessionState — convert transcript events to ProviderMessages
+// ---------------------------------------------------------------------------
+
+import type { ProviderMessage } from "../engine/types.js";
+
+/**
+ * Rebuild ProviderMessage[] from transcript events for resume.
+ * Filters to only user/assistant/system events and converts to engine format.
+ */
+export function rebuildSessionState(events: TranscriptEvent[]): ProviderMessage[] {
+  const messages: ProviderMessage[] = [];
+
+  for (const event of events) {
+    // Skip non-transcript types (shouldn't be in file, but defensive)
+    if (!isTranscriptEventType(event.type)) continue;
+
+    switch (event.type) {
+      case "system":
+        messages.push({ role: "system", content: event.content });
+        break;
+      case "user":
+        messages.push({ role: "user", content: event.content });
+        break;
+      case "assistant":
+        messages.push({ role: "assistant", content: event.content });
+        break;
+      case "attachment":
+        // Attachments become user messages with context
+        messages.push({ role: "user", content: `[Attachment]: ${event.content}` });
+        break;
+    }
+  }
+
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,36 +251,10 @@ export async function getAvailableSessions(baseDir: string): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
-// getSessionMetadata
+// Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Read metadata from a session directory:
- * - title: content of the first user event (truncated to 120 chars)
- * - eventCount: total number of events
- * - lastModified: ISO timestamp of the transcript file's last modification
- *
- * Returns null if the session doesn't exist or has no transcript.
- */
-export async function getSessionMetadata(
-  sessionDir: string,
-): Promise<SessionMetadata | null> {
-  const filePath = join(sessionDir, "transcript.jsonl");
-
-  let fileStat;
-  try {
-    fileStat = await stat(filePath);
-  } catch (err: unknown) {
-    if (isEnoent(err)) return null;
-    return null;
-  }
-
-  const result = await loadTranscript(sessionDir);
-  if (!result.success) return null;
-
-  const events = result.events;
-
-  // Find first user event for title
+function extractMetadata(events: TranscriptEvent[], lastModified: string): SessionMetadata {
   let title = "Untitled session";
   for (const event of events) {
     if (event.type === "user" && event.content) {
@@ -148,13 +268,32 @@ export async function getSessionMetadata(
   return {
     title,
     eventCount: events.length,
-    lastModified: fileStat.mtime.toISOString(),
+    lastModified,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+function parseTranscriptContent(content: string, filePath: string): ResumeResult {
+  const lines = content.split("\n");
+  const events: TranscriptEvent[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || line.trim() === "") continue;
+
+    try {
+      const parsed = JSON.parse(line) as TranscriptEvent;
+      // Runtime type validation — only allow transcript event types
+      if (!isTranscriptEventType(parsed.type)) {
+        continue; // Skip non-transcript types silently
+      }
+      events.push(parsed);
+    } catch {
+      console.warn(`Skipping malformed transcript line ${i + 1} in ${filePath}`);
+    }
+  }
+
+  return { success: true, events };
+}
 
 function isEnoent(err: unknown): boolean {
   return err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT";

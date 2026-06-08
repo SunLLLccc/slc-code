@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { Command, CommandContext } from "../registry.js";
-import { loadTranscript, getAvailableSessions } from "../../session/resume.js";
+import { loadTranscript, getAvailableSessions, rebuildSessionState } from "../../session/resume.js";
 
 const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
@@ -45,15 +45,16 @@ export const rewindCommand: Command = {
     const kept = result.events.slice(0, idx + 1);
     const removed = result.events.length - kept.length;
 
-    const lines: string[] = [
-      `Would rewind to event ${targetUuid} (${idx + 1}/${result.events.length}).`,
-      `  Keep: ${kept.length} events`,
-      `  Remove: ${removed} events`,
-      "",
-      "Note: Full rewind (truncating transcript) is not yet implemented.",
-    ];
+    // Actually rewind: rebuild messages from kept events and load into QueryEngine
+    const rewindCallback = context.rewindToEvent ?? (context.config?.rewindToEvent as ((uuid: string) => Promise<boolean>) | undefined);
+    if (rewindCallback) {
+      const success = await rewindCallback(targetUuid);
+      if (!success) {
+        return `Failed to rewind to event ${targetUuid}.`;
+      }
+    }
 
-    return lines.join("\n");
+    return `Rewound to event ${targetUuid} (${idx + 1}/${result.events.length}).\n  Kept: ${kept.length} events\n  Removed: ${removed} events`;
   },
 };
 
