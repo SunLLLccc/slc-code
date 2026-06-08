@@ -2,6 +2,7 @@
 
 import type { Skill } from "./loader.js";
 import { execFileSync } from "node:child_process";
+import { sanitizeUnicode } from "../security/unicode.js";
 
 /**
  * Execute a skill and return its content.
@@ -18,13 +19,16 @@ export async function executeSkill(
 ): Promise<string> {
   const content = skill.content;
 
-  // Only interpolate for trusted sources
+  // Only interpolate for trusted sources (project/user, not MCP/bundled)
   if (!skill.meta.allowShellInterpolation) {
-    return content;
+    // Still sanitize external content — PRD 16.1
+    return sanitizeUnicode(content);
   }
 
   // Shell interpolation: replace `!command` patterns
-  return interpolateShellCommands(content, context.cwd);
+  const interpolated = interpolateShellCommands(content, context.cwd);
+  // Sanitize after interpolation
+  return sanitizeUnicode(interpolated);
 }
 
 /**

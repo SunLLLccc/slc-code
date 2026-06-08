@@ -7,6 +7,7 @@ import {
   filterEventForCapabilities,
 } from "./providers/capabilities.js";
 import { toError } from "../utils/errors.js";
+import { sanitizeUnicode } from "../security/unicode.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { scheduleToolCalls, type ToolCall as SchedulerToolCall } from "../tools/scheduler.js";
 import type { ToolContext } from "../tools/base.js";
@@ -145,11 +146,13 @@ export async function* query(
       );
 
       // Inject tool results into conversation and yield events
+      // Sanitize tool result content — PRD 16.1: external content enters prompt after Unicode cleaning
       for (const result of results) {
+        const sanitizedOutput = sanitizeUnicode(result.output.output);
         const toolResult: ProviderMessage = {
           role: "tool",
           toolCallId: result.toolCallId,
-          result: result.output.output,
+          result: sanitizedOutput,
           isError: result.output.isError,
         };
         conversation.push(toolResult);
@@ -157,7 +160,7 @@ export async function* query(
         yield {
           type: "tool_call_result",
           id: result.toolCallId,
-          result: result.output.output,
+          result: sanitizedOutput,
           isError: result.output.isError,
         };
       }

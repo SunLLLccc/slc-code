@@ -7,16 +7,16 @@ import { loadSkill } from "./loader.js";
 export interface SkillMeta {
   name: string;
   description: string;
-  source: "user" | "project" | "bundled";
+  source: "user" | "project" | "bundled" | "mcp";
   path: string;
   paths?: string[];
   /** Whether shell interpolation is allowed for this skill */
   allowShellInterpolation?: boolean;
 }
 
-/** In-memory cache for discovered skills per cwd */
+/** In-memory cache for discovered skills — keyed by full input combination */
 let cachedSkills: SkillMeta[] | null = null;
-let cachedCwd: string | null = null;
+let cacheKey: string | null = null;
 
 /**
  * Discover all skills from project, user, and bundled directories.
@@ -32,10 +32,11 @@ export async function discoverSkills(options: {
   force?: boolean;
 }): Promise<SkillMeta[]> {
   const { projectRoot, userConfigDir, bundledDir, cwd, force } = options;
-  const cacheKey = cwd ?? projectRoot;
+  // Cache key includes all inputs that affect results
+  const key = `${projectRoot}|${userConfigDir}|${bundledDir ?? ""}|${cwd ?? ""}`;
 
   // Memoize cache
-  if (!force && cachedSkills && cachedCwd === cacheKey) {
+  if (!force && cachedSkills && cacheKey === key) {
     return cachedSkills;
   }
 
@@ -66,7 +67,7 @@ export async function discoverSkills(options: {
   }
 
   cachedSkills = result;
-  cachedCwd = cacheKey;
+  cacheKey = key;
   return result;
 }
 
@@ -104,31 +105,46 @@ export function filterActiveSkills(
  * Supports: * (any segment), ** (any depth), literal matching.
  */
 function matchGlobPattern(pattern: string, path: string): boolean {
-  // Normalize
   const p = pattern.replace(/\\/g, "/");
   const f = path.replace(/\\/g, "/");
 
-  // ** matches any depth
   if (p === "**") return true;
-  if (p.endsWith("/**")) {
-    const prefix = p.slice(0, -3);
-    return f.startsWith(prefix + "/") || f === prefix;
-  }
-  if (p.startsWith("**/")) {
-    const suffix = p.slice(3);
-    return f.endsWith(suffix) || f.includes("/" + suffix);
-  }
 
-  // * matches any single segment
-  if (p.includes("*")) {
-    const regex = new RegExp(
-      "^" + p.replace(/\./g, "\\.").replace(/\*\*/g, "⟨GLOBSTAR⟩").replace(/\*/g, "[^/]*").replace(/⟨GLOBSTAR⟩/g, ".*") + "$",
-    );
-    return regex.test(f);
+  // Convert glob to regex with proper ** handling
+  // src/**/*.ts → src/(.+/)?[^/]*\.ts  (zero or more intermediate dirs)
+  let regexStr = "^";
+  const segments = p.split("/");
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]!;
+    if (seg === "**") {
+      if (i === 0) {
+        // Leading **: match any prefix
+        regexStr += "(.+/)?";
+      } else if (i === segments.length - 1) {
+        // Trailing **: match anything after
+        regexStr += ".*";
+      } else {
+        // Middle **: match zero or more intermediate directories
+        regexStr += "(/[^/]+)*";
+      }
+    } else if (seg === "*") {
+      regexStr += "[^/]*";
+    } else {
+      // Escape regex special chars in literal segments
+      regexStr += seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
+    }
+    if (i < segments.length - 1 && segments[i + 1] !== "**") {
+      regexStr += "/";
+    }
   }
+  regexStr += "$";
 
-  // Literal match or prefix match
-  return f === p || f.startsWith(p + "/");
+  try {
+    return new RegExp(regexStr).test(f);
+  } catch {
+    // Fallback to literal match
+    return f === p;
+  }
 }
 
 /** Scan a directory for subdirectories containing SKILL.md files. */
@@ -162,5 +178,5 @@ async function scanSkillDir(
 /** Clear the discovery cache (for testing). */
 export function clearDiscoveryCache(): void {
   cachedSkills = null;
-  cachedCwd = null;
+  cacheKey = null;
 }

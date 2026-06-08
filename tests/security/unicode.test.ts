@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { sanitizeUnicode } from "../../src/security/unicode.js";
+import { MockProvider } from "../../src/engine/providers/base.js";
+import { QueryEngine } from "../../src/engine/engine.js";
+import type { StreamEvent, ProviderTool } from "../../src/engine/types.js";
+import type { Provider } from "../../src/engine/providers/base.js";
 
 describe("sanitizeUnicode", () => {
   it("leaves normal text unchanged", () => {
@@ -109,5 +113,59 @@ describe("sanitizeUnicode", () => {
       }
       expect(current.value).toBe("deep");
     });
+  });
+
+  describe("JSON key cleaning", () => {
+    it("cleans hidden characters in JSON keys", () => {
+      // key with zero-width space: "he​llo"
+      const input = '{"he​llo":"world"}';
+      const result = sanitizeUnicode(input);
+      const parsed = JSON.parse(result);
+      expect(parsed.hello).toBe("world");
+    });
+
+    it("cleans nested object keys", () => {
+      const input = JSON.stringify({ outer: { "ke​y": "value" } });
+      const result = sanitizeUnicode(input);
+      const parsed = JSON.parse(result);
+      expect(parsed.outer.key).toBe("value");
+    });
+
+    it("key collision: last value wins (consistent with JS object behavior)", () => {
+      // Two keys that become identical after cleaning
+      const input = '{"a":1,"a​":2}';
+      const result = sanitizeUnicode(input);
+      const parsed = JSON.parse(result);
+      // Both keys clean to "a" — last one wins
+      expect(parsed.a).toBe(2);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unicode sanitization in QueryEngine — tool result cleaning
+// ---------------------------------------------------------------------------
+
+describe("Unicode sanitization in QueryEngine", () => {
+  it("user input is sanitized before entering messages", async () => {
+    const receivedMessages: unknown[][] = [];
+    const provider: Provider = {
+      name: "spy",
+      capabilities: { toolUse: false, streaming: true, vision: false, promptCache: false, extendedThinking: false },
+      defaultModel: "test",
+      async *chat(messages) {
+        receivedMessages.push([...messages]);
+        yield { type: "text_delta" as const, text: "ok" };
+        yield { type: "done" as const, reason: "completed" as const };
+      },
+    };
+
+    const engine = new QueryEngine(provider);
+    // User input with hidden character
+    for await (const _ of engine.query("Hello​World")) { /* consume */ }
+
+    // Provider should receive sanitized input
+    const userMsg = receivedMessages[0]!.find((m: any) => m.role === "user");
+    expect(userMsg.content).toBe("HelloWorld");
   });
 });

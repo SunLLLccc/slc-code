@@ -1,6 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { HookRegistry } from "../../src/hooks/registry.js";
 import type { Hook, HookResult } from "../../src/hooks/types.js";
+import { buildTool } from "../../src/tools/base.js";
+import { ToolRegistry } from "../../src/tools/registry.js";
+import { scheduleToolCalls, type ToolCall } from "../../src/tools/scheduler.js";
+
+const CTX = { cwd: "/tmp" };
 
 describe("HookRegistry", () => {
   describe("register and getHooks", () => {
@@ -187,5 +192,98 @@ describe("HookRegistry", () => {
       const results = await registry.runHooks("SessionStart", {});
       expect(results).toHaveLength(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toPreToolUseHooks — scheduler integration
+// ---------------------------------------------------------------------------
+
+describe("toPreToolUseHooks scheduler integration", () => {
+  it("deny hook blocks tool execution via scheduleToolCalls", async () => {
+    const executeSpy = vi.fn().mockResolvedValue({ output: "should not run" });
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.registerBuiltin(buildTool({
+      name: "BlockedTool",
+      description: "test",
+      schema: { input: { type: "object", properties: { x: { type: "string" } } } },
+      security: { readOnly: false, concurrencySafe: true, destructive: false },
+      execute: executeSpy,
+    }));
+
+    const hookRegistry = new HookRegistry();
+    hookRegistry.register({
+      name: "deny-all",
+      type: "PreToolUse",
+      handler: async () => ({ action: "deny", reason: "blocked by hook" }),
+    });
+
+    const preToolUseHooks = hookRegistry.toPreToolUseHooks();
+    const call: ToolCall = { id: "tc-1", name: "BlockedTool", arguments: '{"x":"y"}' };
+
+    const { results } = await scheduleToolCalls(
+      [call],
+      toolRegistry,
+      CTX,
+      { preToolUseHooks },
+    );
+
+    expect(results[0].output.isError).toBe(true);
+    expect(results[0].output.output).toContain("denied");
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("allow hook lets tool execute via scheduleToolCalls", async () => {
+    const executeSpy = vi.fn().mockResolvedValue({ output: "executed" });
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.registerBuiltin(buildTool({
+      name: "AllowedTool",
+      description: "test",
+      schema: { input: { type: "object", properties: { x: { type: "string" } } } },
+      security: { readOnly: false, concurrencySafe: true, destructive: false },
+      execute: executeSpy,
+    }));
+
+    const hookRegistry = new HookRegistry();
+    hookRegistry.register({
+      name: "allow-all",
+      type: "PreToolUse",
+      handler: async () => ({ action: "allow" }),
+    });
+
+    const preToolUseHooks = hookRegistry.toPreToolUseHooks();
+    const call: ToolCall = { id: "tc-2", name: "AllowedTool", arguments: '{"x":"y"}' };
+
+    const { results } = await scheduleToolCalls(
+      [call],
+      toolRegistry,
+      CTX,
+      { preToolUseHooks },
+    );
+
+    expect(results[0].output.isError).toBeFalsy();
+    expect(executeSpy).toHaveBeenCalledOnce();
+  });
+
+  it("empty registry returns no hooks, tool executes normally", async () => {
+    const executeSpy = vi.fn().mockResolvedValue({ output: "ok" });
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.registerBuiltin(buildTool({
+      name: "NormalTool",
+      description: "test",
+      schema: { input: { type: "object" } },
+      security: { readOnly: false, concurrencySafe: true, destructive: false },
+      execute: executeSpy,
+    }));
+
+    const hookRegistry = new HookRegistry();
+    const preToolUseHooks = hookRegistry.toPreToolUseHooks();
+    expect(preToolUseHooks).toHaveLength(0);
+
+    const call: ToolCall = { id: "tc-3", name: "NormalTool", arguments: "{}" };
+    const { results } = await scheduleToolCalls([call], toolRegistry, CTX);
+
+    expect(results[0].output.isError).toBeFalsy();
+    expect(executeSpy).toHaveBeenCalledOnce();
   });
 });
