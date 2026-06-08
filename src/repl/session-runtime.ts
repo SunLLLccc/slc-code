@@ -30,7 +30,7 @@ export function createResumeSession(
     const messages = rebuildSessionState(result.events);
     engine.loadMessages(messages);
     // Update SessionManager to track resumed session as current
-    sessionManager.switchSession(sessionDir);
+    await sessionManager.switchSession(sessionDir);
     return true;
   };
 }

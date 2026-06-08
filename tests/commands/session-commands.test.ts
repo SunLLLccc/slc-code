@@ -1,11 +1,16 @@
 // Tests for /resume, /session, /rename, /rewind commands
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDefaultRegistry } from "../../src/commands/index.js";
 import { TranscriptWriter } from "../../src/session/transcript.js";
+import { SessionManager } from "../../src/repl/session-manager.js";
+import { createResumeSession } from "../../src/repl/session-runtime.js";
+import { QueryEngine } from "../../src/engine/engine.js";
+import type { Provider } from "../../src/engine/providers/base.js";
 import type { CommandContext } from "../../src/commands/registry.js";
 
 let testDir: string;
@@ -272,5 +277,75 @@ describe("createDefaultRegistry includes session commands", () => {
 
   it("has /rewind", () => {
     expect(createDefaultRegistry().has("rewind")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createResumeSession + SessionManager integration
+// ---------------------------------------------------------------------------
+
+describe("createResumeSession + SessionManager integration", () => {
+  // Minimal mock provider — never actually called
+  const mockProvider: Provider = {
+    name: "mock",
+    async *stream() {},
+    supportsToolUse: false,
+    supportsStreaming: false,
+  };
+
+  it("resume updates SessionManager sessionDir and subsequent append goes to target", async () => {
+    // Create two sessions
+    const oldDir = join(testDir, "old-session");
+    const targetDir = join(testDir, "target-session");
+    const oldWriter = new TranscriptWriter({ sessionDir: oldDir, enabled: true });
+    await oldWriter.append({ uuid: "old-1", type: "user", timestamp: "", content: "old" });
+    const targetWriter = new TranscriptWriter({ sessionDir: targetDir, enabled: true });
+    await targetWriter.append({ uuid: "t-1", type: "user", timestamp: "", content: "target" });
+
+    // SessionManager starts in old session
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(30);
+    // Manually switch to old
+    await sm.switchSession(oldDir);
+    expect(sm.sessionDir).toBe(oldDir);
+
+    // Create resume callback and call it
+    const engine = new QueryEngine(mockProvider);
+    const resume = createResumeSession(engine, sm, testDir);
+    const result = await resume(targetDir);
+    expect(result).toBe(true);
+
+    // SessionManager now points to target
+    expect(sm.sessionDir).toBe(targetDir);
+
+    // Subsequent append goes to target, not old
+    await sm.appendUserEvent("After resume");
+    expect(existsSync(join(targetDir, "transcript.jsonl"))).toBe(true);
+    const content = await readFile(join(targetDir, "transcript.jsonl"), "utf-8");
+    expect(content).toContain("After resume");
+    // Old session unchanged
+    const oldContent = await readFile(join(oldDir, "transcript.jsonl"), "utf-8");
+    expect(oldContent).not.toContain("After resume");
+  });
+
+  it("resume in bare mode updates sessionDir but no writer", async () => {
+    const targetDir = join(testDir, "target-bare");
+    const targetWriter = new TranscriptWriter({ sessionDir: targetDir, enabled: true });
+    await targetWriter.append({ uuid: "t-1", type: "user", timestamp: "", content: "target" });
+
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
+    await sm.cleanupAndInit(30);
+
+    const engine = new QueryEngine(mockProvider);
+    const resume = createResumeSession(engine, sm, testDir);
+    const result = await resume(targetDir);
+    expect(result).toBe(true);
+
+    // sessionDir updated
+    expect(sm.sessionDir).toBe(targetDir);
+    // But no writer — append no-op
+    await sm.appendUserEvent("Bare no-op");
+    const content = await readFile(join(targetDir, "transcript.jsonl"), "utf-8");
+    expect(content).not.toContain("Bare no-op");
   });
 });
