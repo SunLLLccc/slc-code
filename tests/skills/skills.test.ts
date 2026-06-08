@@ -235,6 +235,7 @@ describe("isSkillActiveForPath", () => {
       paths: ["src/**/*.ts"],
     };
     expect(isSkillActiveForPath(skill, "/project/src/main.ts", "/project")).toBe(true);
+    expect(isSkillActiveForPath(skill, "/project/src/dir/main.ts", "/project")).toBe(true);
   });
 
   it("skill with non-matching path is not active", () => {
@@ -243,6 +244,25 @@ describe("isSkillActiveForPath", () => {
       paths: ["docs/**/*.md"],
     };
     expect(isSkillActiveForPath(skill, "/project/src/main.ts", "/project")).toBe(false);
+  });
+
+  it("src/** does NOT match src2/** (prefix boundary)", () => {
+    const skill: SkillMeta = {
+      name: "x", description: "", source: "project", path: "/tmp",
+      paths: ["src/**"],
+    };
+    expect(isSkillActiveForPath(skill, "/project/src/a.ts", "/project")).toBe(true);
+    expect(isSkillActiveForPath(skill, "/project/src2/a.ts", "/project")).toBe(false);
+    expect(isSkillActiveForPath(skill, "/project/other/a.ts", "/project")).toBe(false);
+  });
+
+  it("src/*.ts does NOT match src/dir/a.ts (single segment)", () => {
+    const skill: SkillMeta = {
+      name: "x", description: "", source: "project", path: "/tmp",
+      paths: ["src/*.ts"],
+    };
+    expect(isSkillActiveForPath(skill, "/project/src/a.ts", "/project")).toBe(true);
+    expect(isSkillActiveForPath(skill, "/project/src/dir/a.ts", "/project")).toBe(false);
   });
 
   it("skill with literal path match", () => {

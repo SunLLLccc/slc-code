@@ -110,41 +110,52 @@ function matchGlobPattern(pattern: string, path: string): boolean {
 
   if (p === "**") return true;
 
-  // Convert glob to regex with proper ** handling
-  // src/**/*.ts → src/(.+/)?[^/]*\.ts  (zero or more intermediate dirs)
-  let regexStr = "^";
-  const segments = p.split("/");
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i]!;
-    if (seg === "**") {
-      if (i === 0) {
-        // Leading **: match any prefix
-        regexStr += "(.+/)?";
-      } else if (i === segments.length - 1) {
-        // Trailing **: match anything after
-        regexStr += ".*";
-      } else {
-        // Middle **: match zero or more intermediate directories
-        regexStr += "(/[^/]+)*";
-      }
-    } else if (seg === "*") {
-      regexStr += "[^/]*";
-    } else {
-      // Escape regex special chars in literal segments
-      regexStr += seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
-    }
-    if (i < segments.length - 1 && segments[i + 1] !== "**") {
-      regexStr += "/";
-    }
-  }
-  regexStr += "$";
+  // Split into segments and match recursively
+  return matchSegments(p.split("/"), f.split("/"));
+}
 
-  try {
-    return new RegExp(regexStr).test(f);
-  } catch {
-    // Fallback to literal match
-    return f === p;
+function matchSegments(patternSegs: string[], pathSegs: string[]): boolean {
+  let pi = 0;
+  let fi = 0;
+
+  while (pi < patternSegs.length && fi < pathSegs.length) {
+    const pat = patternSegs[pi]!;
+
+    if (pat === "**") {
+      // ** matches zero or more path segments
+      pi++;
+      if (pi >= patternSegs.length) return true; // trailing ** matches everything
+
+      // Try matching remaining pattern against every possible suffix
+      while (fi <= pathSegs.length) {
+        if (matchSegments(patternSegs.slice(pi), pathSegs.slice(fi))) {
+          return true;
+        }
+        fi++;
+      }
+      return false;
+    }
+
+    if (!matchSegment(pat, pathSegs[fi]!)) return false;
+    pi++;
+    fi++;
   }
+
+  // Both exhausted, or trailing ** consumed remaining
+  return pi >= patternSegs.length && fi >= pathSegs.length;
+}
+
+function matchSegment(pattern: string, segment: string): boolean {
+  if (pattern === "*") return true;
+  if (pattern === segment) return true;
+
+  // Simple wildcard within segment: *.ts matches foo.ts
+  if (pattern.includes("*")) {
+    const regex = "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$";
+    return new RegExp(regex).test(segment);
+  }
+
+  return false;
 }
 
 /** Scan a directory for subdirectories containing SKILL.md files. */

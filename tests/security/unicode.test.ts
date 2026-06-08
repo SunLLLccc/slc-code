@@ -168,4 +168,52 @@ describe("Unicode sanitization in QueryEngine", () => {
     const userMsg = receivedMessages[0]!.find((m: any) => m.role === "user");
     expect(userMsg.content).toBe("HelloWorld");
   });
+
+  it("tool result is sanitized before entering second round provider messages", async () => {
+    let round = 0;
+    const receivedMessages: unknown[][] = [];
+
+    const provider: Provider = {
+      name: "tool-result-spy",
+      capabilities: { toolUse: true, streaming: true, vision: false, promptCache: false, extendedThinking: false },
+      defaultModel: "test",
+      async *chat(messages) {
+        round++;
+        receivedMessages.push([...messages]);
+        if (round === 1) {
+          yield { type: "tool_call_start" as const, id: "tc-1", name: "TestTool" };
+          yield { type: "tool_call_args" as const, id: "tc-1", args_json: '{"x":"y"}' };
+        } else {
+          yield { type: "text_delta" as const, text: "done" };
+          yield { type: "done" as const, reason: "completed" as const };
+        }
+      },
+    };
+
+    const { ToolRegistry } = await import("../../src/tools/registry.js");
+    const { buildTool } = await import("../../src/tools/base.js");
+    const registry = new ToolRegistry();
+    // Tool returns text with hidden character
+    registry.registerBuiltin(buildTool({
+      name: "TestTool",
+      description: "test",
+      schema: { input: { type: "object" } },
+      security: { readOnly: true, concurrencySafe: true, destructive: false },
+      execute: async () => ({ output: "Hello​World" }), // zero-width space
+    }));
+
+    const engine = new QueryEngine(provider, {
+      tools: registry.toProviderTools(),
+      toolRegistry: registry,
+    });
+
+    for await (const _ of engine.query("test")) { /* consume */ }
+
+    // Second round messages should contain sanitized tool result
+    const secondRound = receivedMessages[1]!;
+    const toolResultMsg = secondRound.find((m: any) => m.role === "tool");
+    expect(toolResultMsg).toBeDefined();
+    expect(toolResultMsg.result).toBe("HelloWorld"); // hidden char removed
+    expect(toolResultMsg.result).not.toContain("​");
+  });
 });
