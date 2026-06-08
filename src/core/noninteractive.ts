@@ -5,8 +5,11 @@ import { QueryEngine } from "../engine/engine.js";
 import type { StreamEvent } from "../engine/types.js";
 import { assembleSystemPrompt } from "../prompt/assembly.js";
 import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
-import { loadMcpToolsIntoRegistry } from "../tools/mcp/loader.js";
+import { loadMcpToolsIntoRegistry, disconnectAll } from "../tools/mcp/loader.js";
 import type { McpServerConfig } from "../tools/mcp/client.js";
+import { McpAuthCache } from "../tools/mcp/auth-cache.js";
+import { createPermissionChecker } from "../permissions/checker.js";
+import { parseRule, type PermissionRule } from "../permissions/rules.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,39 +43,64 @@ export async function executePrint(
     userConfigDir?: string;
     skipPromptAssembly?: boolean;
     mcpServers?: Record<string, { transport: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }>;
+    permissions?: { allow?: string[]; deny?: string[]; ask?: string[] };
+    permissionMode?: string;
   },
 ): Promise<NonInteractiveResult> {
+  const cwd = options?.cwd ?? process.cwd();
   const systemPrompt = await assembleSystemPrompt({
-    cwd: options?.cwd,
+    cwd,
     userConfigDir: options?.userConfigDir,
     skip: options?.skipPromptAssembly,
   });
 
   // Create registry and load MCP tools if configured
   const toolRegistry = createBuiltinRegistry();
+  const authCache = new McpAuthCache();
   if (options?.mcpServers) {
     const mcpConfigs: McpServerConfig[] = Object.entries(options.mcpServers).map(
       ([name, setting]) => ({ name, ...setting } as McpServerConfig),
     );
-    await loadMcpToolsIntoRegistry(mcpConfigs, toolRegistry).catch(() => {/* logged by loader */});
+    await loadMcpToolsIntoRegistry(mcpConfigs, toolRegistry, { authCache }).catch(() => {/* logged by loader */});
   }
 
+  // Create permission checker — in non-interactive mode, "ask" blocks (no UI to confirm)
+  const permissionsConfig = options?.permissions;
+  const configRules: PermissionRule[] = [
+    ...(permissionsConfig?.deny ?? []).map((r) => parseRule(r, "deny")),
+    ...(permissionsConfig?.ask ?? []).map((r) => parseRule(r, "ask")),
+    ...(permissionsConfig?.allow ?? []).map((r) => parseRule(r, "allow")),
+  ];
+  const permissionChecker = createPermissionChecker({
+    mode: (options?.permissionMode as any) ?? "default",
+    rules: configRules,
+    projectRoot: cwd,
+  });
+
+  const toolContext = { cwd };
   const engine = new QueryEngine(provider, {
     ...(systemPrompt ? { systemPrompt } : undefined),
     tools: toolRegistry.toProviderTools(),
     toolRegistry,
+    toolContext,
+    permissionChecker,
   });
   const events: StreamEvent[] = [];
   let hasError = false;
   let errorMessage: string | undefined;
 
-  for await (const event of engine.query(query)) {
-    events.push(event);
+  try {
+    for await (const event of engine.query(query)) {
+      events.push(event);
 
-    if (event.type === "error") {
-      hasError = true;
-      errorMessage = event.error.message;
+      if (event.type === "error") {
+        hasError = true;
+        errorMessage = event.error.message;
+      }
     }
+  } finally {
+    // Always clean up MCP connections
+    await disconnectAll().catch(() => {/* ignore cleanup errors */});
   }
 
   // Collect text from events

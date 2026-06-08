@@ -26,6 +26,9 @@ export interface McpTool {
   inputSchema: Record<string, unknown>;
 }
 
+/** Error classification for MCP operations. */
+export type McpErrorKind = "auth" | "session_expired" | "timeout" | "connection";
+
 /** Structured error for MCP operations. */
 export class McpError extends Error {
   constructor(
@@ -33,6 +36,7 @@ export class McpError extends Error {
     public readonly serverName: string,
     public readonly code?: number,
     public readonly cause?: unknown,
+    public readonly kind: McpErrorKind = "connection",
   ) {
     super(message);
     this.name = "McpError";
@@ -49,6 +53,9 @@ function timeoutPromise<T>(promise: Promise<T>, ms: number, serverName: string, 
       reject(new McpError(
         `${operation} timed out after ${ms}ms for server "${serverName}"`,
         serverName,
+        undefined,
+        undefined,
+        "timeout",
       ));
     }, ms);
 
@@ -302,31 +309,59 @@ export class McpClient {
     }
   }
 
-  /** Wrap an unknown error into an McpError, detecting session expiry. */
+  /** Wrap an unknown error into an McpError, classifying the error kind. */
   private wrapError(err: unknown, operation: string): McpError {
     if (err instanceof McpError) return err;
 
     const message = err instanceof Error ? err.message : String(err);
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    const code = (err as { code?: number }).code;
 
-    // Detect session expiry: HTTP 404 or JSON-RPC -32001
-    if (
-      message.includes("404") ||
-      message.includes("-32001") ||
-      message.includes("session")
-    ) {
+    // Session expired: HTTP 404 or JSON-RPC -32001
+    if (statusCode === 404 || code === -32001) {
       return new McpError(
         `Session expired for server "${this.config.name}": ${message}`,
         this.config.name,
         -32001,
         err,
+        "session_expired",
       );
     }
 
+    // Auth failure: HTTP 401/403 or SDK auth errors
+    if (
+      statusCode === 401 ||
+      statusCode === 403 ||
+      message.toLowerCase().includes("unauthorized") ||
+      message.toLowerCase().includes("auth required")
+    ) {
+      return new McpError(
+        `Authentication failed for server "${this.config.name}": ${message}`,
+        this.config.name,
+        statusCode,
+        err,
+        "auth",
+      );
+    }
+
+    // Timeout
+    if (message.includes("timed out")) {
+      return new McpError(
+        message,
+        this.config.name,
+        undefined,
+        err,
+        "timeout",
+      );
+    }
+
+    // Connection / other
     return new McpError(
       `${operation} failed for server "${this.config.name}": ${message}`,
       this.config.name,
       undefined,
       err,
+      "connection",
     );
   }
 }

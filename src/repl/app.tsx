@@ -21,6 +21,7 @@ import { getPermissionRules } from "../commands/builtin/permissions.js";
 import { loadMcpToolsIntoRegistry, disconnectAll } from "../tools/mcp/loader.js";
 import type { McpServerConfig } from "../tools/mcp/client.js";
 import type { McpServerSetting } from "../config/settings.js";
+import { McpAuthCache } from "../tools/mcp/auth-cache.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -74,14 +75,16 @@ export function ReplApp({
     // Initialize tools and permissions FIRST (always available, even if prompt fails)
     const toolRegistry = createBuiltinRegistry();
     const toolContext = { cwd };
-    // Load MCP tools from config
+    // Load MCP tools from config with auth cache
     const mcpServersConfig = commandContext.config?.mcpServers as Record<string, McpServerSetting> | undefined;
+    const mcpAuthCache = new McpAuthCache();
     const mcpLoadPromise = mcpServersConfig
       ? loadMcpToolsIntoRegistry(
           Object.entries(mcpServersConfig).map(
             ([name, setting]) => ({ name, ...setting } as McpServerConfig),
           ),
           toolRegistry,
+          { authCache: mcpAuthCache },
         ).catch(() => ({ connected: [], failed: [] }))
       : Promise.resolve({ connected: [] as string[], failed: [] as string[] });
     const permissionsConfig = commandContext.config?.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
@@ -135,6 +138,7 @@ export function ReplApp({
 
     return () => {
       sm.close();
+      disconnectAll().catch(() => {/* ignore cleanup errors */});
     };
   }, []);
 

@@ -202,8 +202,9 @@ describe("McpClient", () => {
     expect(client.isConnected()).toBe(false);
   });
 
-  it("connect() detects session expiry in error messages", async () => {
-    mockConnect.mockRejectedValueOnce(new Error("HTTP 404 Not Found"));
+  it("connect() detects session expiry from HTTP 404", async () => {
+    const err = Object.assign(new Error("Not Found"), { statusCode: 404 });
+    mockConnect.mockRejectedValueOnce(err);
 
     const client = new McpClient(config);
     await expect(client.connect()).rejects.toThrow(/Session expired/);
@@ -729,8 +730,26 @@ describe("loadMcpToolsIntoRegistry", () => {
     expect(mockConnect).not.toHaveBeenCalled();
   });
 
-  it("marks auth failure on session expiry error", async () => {
-    mockConnect.mockRejectedValueOnce(new Error("HTTP 404 Not Found"));
+  it("marks auth failure on 401 error, not session expiry", async () => {
+    const authErr = Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+    mockConnect.mockRejectedValueOnce(authErr);
+
+    const registry = new ToolRegistry();
+    const authCache = new McpAuthCache();
+    const configs: McpServerConfig[] = [
+      { name: "auth-fail-server", transport: "sse", url: "http://localhost:3000" },
+    ];
+
+    const result = await loadMcpToolsIntoRegistry(configs, registry, { authCache });
+
+    expect(result.connected).toEqual([]);
+    expect(result.failed).toEqual(["auth-fail-server"]);
+    expect(authCache.isBlocked("auth-fail-server")).toBe(true);
+  });
+
+  it("session expiry does NOT mark auth failure", async () => {
+    const sessionErr = Object.assign(new Error("Not Found"), { statusCode: 404 });
+    mockConnect.mockRejectedValueOnce(sessionErr);
 
     const registry = new ToolRegistry();
     const authCache = new McpAuthCache();
@@ -742,7 +761,8 @@ describe("loadMcpToolsIntoRegistry", () => {
 
     expect(result.connected).toEqual([]);
     expect(result.failed).toEqual(["expire-server"]);
-    expect(authCache.isBlocked("expire-server")).toBe(true);
+    // session expiry should NOT mark auth failure
+    expect(authCache.isBlocked("expire-server")).toBe(false);
   });
 
   it("failed server is cleaned up from cache", async () => {
