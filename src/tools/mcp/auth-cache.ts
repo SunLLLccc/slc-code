@@ -52,15 +52,23 @@ export class McpAuthCache {
     return entry.token;
   }
 
-  /** Record a failure for `serverName`, blocking reads for failureTtlMs. */
+  /** Record a failure for `serverName`, blocking reads for failureTtlMs.
+   *  Works even without a prior set() — creates a minimal entry if needed. */
   markFailed(serverName: string): void {
-    const entry = this.entries.get(serverName);
-    if (entry) {
-      entry.failedAt = Date.now();
+    let entry = this.entries.get(serverName);
+    if (!entry) {
+      entry = {
+        serverName,
+        token: "",
+        expiresAt: 0,
+      };
+      this.entries.set(serverName, entry);
     }
+    entry.failedAt = Date.now();
   }
 
-  /** Whether `serverName` is currently within its failure blocking window. */
+  /** Whether `serverName` is currently within its failure blocking window.
+   *  Returns true after markFailed() regardless of token existence. */
   isBlocked(serverName: string): boolean {
     const entry = this.entries.get(serverName);
     if (!entry || !entry.failedAt) return false;

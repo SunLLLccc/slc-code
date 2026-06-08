@@ -1,7 +1,8 @@
 // MCP Tool Adapter — convert MCP tools to the P5 Tool interface
 
-import type { Tool } from "../base.js";
+import type { Tool, ToolOutput } from "../base.js";
 import type { McpTool } from "./client.js";
+import { McpClient } from "./client.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,12 +33,18 @@ export function truncateDescription(
 /**
  * Convert an MCP tool definition into a P5 `Tool`.
  *
- * The returned tool is a **placeholder** — its execute function returns a
- * static message until real MCP protocol support is wired up.
+ * The returned tool's execute function calls the MCP server via the provided
+ * client and returns the result.
  */
-export function adaptMcpTool(mcpTool: McpTool, serverName: string): Tool {
+export function adaptMcpTool(
+  mcpTool: McpTool,
+  serverName: string,
+  client: McpClient,
+): Tool {
+  const toolName = normalizeMcpToolName(serverName, mcpTool.name);
+
   return {
-    name: normalizeMcpToolName(serverName, mcpTool.name),
+    name: toolName,
     description: truncateDescription(mcpTool.description),
     schema: {
       input: mcpTool.inputSchema,
@@ -47,11 +54,23 @@ export function adaptMcpTool(mcpTool: McpTool, serverName: string): Tool {
       concurrencySafe: false,
       destructive: false,
     },
-    async execute() {
-      return {
-        output: "MCP tool not connected",
-        isError: true,
-      };
+    async execute(input): Promise<ToolOutput> {
+      try {
+        const result = await client.callTool(
+          mcpTool.name,
+          input as Record<string, unknown>,
+        );
+        return {
+          output: result.content,
+          isError: result.isError,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          output: `MCP tool "${toolName}" error: ${message}`,
+          isError: true,
+        };
+      }
     },
   };
 }
