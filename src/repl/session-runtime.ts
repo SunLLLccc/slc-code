@@ -1,8 +1,9 @@
-// Session runtime helpers — wire resume/rewind to QueryEngine
+// Session runtime helpers — wire resume/rewind to QueryEngine and SessionManager
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { QueryEngine } from "../engine/engine.js";
+import type { SessionManager } from "./session-manager.js";
 import {
   loadTranscript,
   getAvailableSessions,
@@ -13,10 +14,12 @@ const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
 /**
  * Create a resumeSession callback for CommandContext.
- * Loads transcript from sessionDir, rebuilds ProviderMessages, and loads into QueryEngine.
+ * Loads transcript, rebuilds ProviderMessages, loads into QueryEngine,
+ * AND updates SessionManager to track the resumed session as current.
  */
 export function createResumeSession(
   engine: QueryEngine,
+  sessionManager: SessionManager,
   sessionsBase: string = DEFAULT_SESSIONS_BASE,
 ): (sessionDir: string) => Promise<boolean> {
   return async (sessionDir: string): Promise<boolean> => {
@@ -26,22 +29,24 @@ export function createResumeSession(
     }
     const messages = rebuildSessionState(result.events);
     engine.loadMessages(messages);
+    // Update SessionManager to track resumed session as current
+    sessionManager.switchSession(sessionDir);
     return true;
   };
 }
 
 /**
  * Create a rewindToEvent callback for CommandContext.
- * Loads transcript, finds the target UUID, truncates messages up to that point.
+ * Uses SessionManager's current sessionDir (not "most recent session").
  */
 export function createRewindToEvent(
   engine: QueryEngine,
-  sessionDir: string | undefined,
+  sessionManager: SessionManager,
   sessionsBase: string = DEFAULT_SESSIONS_BASE,
 ): (uuid: string) => Promise<boolean> {
   return async (uuid: string): Promise<boolean> => {
-    // Determine which session to rewind
-    const targetDir = sessionDir ?? await findMostRecentSession(sessionsBase);
+    // Use current session from SessionManager, not "most recent"
+    const targetDir = sessionManager.sessionDir;
     if (!targetDir) return false;
 
     const result = await loadTranscript(targetDir);
@@ -56,10 +61,4 @@ export function createRewindToEvent(
     engine.replaceMessages(messages);
     return true;
   };
-}
-
-async function findMostRecentSession(sessionsBase: string): Promise<string | null> {
-  const sessions = await getAvailableSessions(sessionsBase);
-  if (sessions.length === 0) return null;
-  return join(sessionsBase, sessions[0]!);
 }

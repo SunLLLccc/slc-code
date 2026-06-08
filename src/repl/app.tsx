@@ -1,11 +1,12 @@
 // Minimal Ink REPL — input box and streaming text output
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp } from "ink";
 import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
 import type { StreamEvent } from "../engine/types.js";
 import type { CommandRegistry, CommandContext } from "../commands/registry.js";
+import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 
 // ---------------------------------------------------------------------------
@@ -38,15 +39,28 @@ export function ReplApp({
   // Persistent QueryEngine — survives across queries, reset on /clear
   const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
 
+  // Session manager — tracks current session, writes transcript
+  const sessionsBase = (commandContext.config?.sessionsBase as string) ?? undefined;
+  const persistenceEnabled = (commandContext.config?.persistenceEnabled as boolean) ?? true;
+  const sessionManagerRef = useRef<SessionManager>(
+    new SessionManager({ sessionsBase, enabled: persistenceEnabled }),
+  );
+
+  // Initialize session on mount
+  useEffect(() => {
+    sessionManagerRef.current.initSession();
+    return () => {
+      sessionManagerRef.current.close();
+    };
+  }, []);
+
   const addOutput = useCallback((line: string) => {
     setOutput((prev) => [...prev, line]);
   }, []);
 
   const handleCommand = useCallback(
     async (cmd: string): Promise<boolean> => {
-      const sessionsBase = (commandContext.config?.sessionsBase as string) ?? undefined;
-      const sessionDir = (commandContext.config?.sessionDir as string) ?? undefined;
-
+      const sm = sessionManagerRef.current;
       const ctx: CommandContext = {
         ...commandContext,
         model: currentModel,
@@ -56,8 +70,13 @@ export function ReplApp({
         clearConversation: () => {
           engineRef.current.reset();
         },
-        resumeSession: createResumeSession(engineRef.current, sessionsBase),
-        rewindToEvent: createRewindToEvent(engineRef.current, sessionDir, sessionsBase),
+        resumeSession: createResumeSession(engineRef.current, sm, sessionsBase),
+        rewindToEvent: createRewindToEvent(engineRef.current, sm, sessionsBase),
+        config: {
+          ...commandContext.config,
+          sessionDir: sm.sessionDir ?? undefined,
+          sessionsBase,
+        },
       };
 
       const result = await commandRegistry.dispatch(cmd, ctx);
@@ -65,7 +84,7 @@ export function ReplApp({
 
       return true;
     },
-    [commandRegistry, commandContext, currentModel, addOutput],
+    [commandRegistry, commandContext, currentModel, addOutput, sessionsBase],
   );
 
   const handleSubmit = useCallback(async () => {
@@ -80,6 +99,9 @@ export function ReplApp({
       await handleCommand(query);
       return;
     }
+
+    // Write user event to transcript
+    await sessionManagerRef.current.appendUserEvent(query);
 
     // Run through QueryEngine
     setStreaming(true);
@@ -98,6 +120,8 @@ export function ReplApp({
 
       if (responseText) {
         addOutput(responseText);
+        // Write assistant event to transcript
+        await sessionManagerRef.current.appendAssistantEvent(responseText);
       }
     } catch (e) {
       addOutput(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
