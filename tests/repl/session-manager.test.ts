@@ -1,4 +1,4 @@
-// Tests for SessionManager — real lifecycle scenarios
+// Tests for SessionManager — real lifecycle scenarios + race condition coverage
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, readFile, mkdir, writeFile } from "node:fs/promises";
@@ -109,7 +109,83 @@ describe("SessionManager.cleanupAndInit", () => {
 });
 
 // ---------------------------------------------------------------------------
-// switchSession
+// ensureInitialized — race condition coverage
+// ---------------------------------------------------------------------------
+
+describe("SessionManager.ensureInitialized", () => {
+  it("append before cleanupAndInit completes still writes transcript", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    // Start cleanupAndInit but don't await — simulates React useEffect fire-and-forget
+    const initPromise = sm.cleanupAndInit(30);
+
+    // Immediately call append — should wait for init to complete
+    await sm.appendUserEvent("Race condition test");
+
+    await initPromise;
+
+    // User event was written (not lost)
+    expect(sm.sessionDir).toBeTruthy();
+    const content = await readFile(join(sm.sessionDir!, "transcript.jsonl"), "utf-8");
+    expect(content).toContain("Race condition test");
+  });
+
+  it("append before cleanupAndInit with cleanupPeriodDays=0 is no-op", async () => {
+    // Create old session
+    const oldDir = join(testDir, "old");
+    await mkdir(oldDir, { recursive: true });
+    await writeFile(join(oldDir, "transcript.jsonl"), "{}");
+
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    // Start cleanupAndInit with cleanupPeriodDays=0
+    const initPromise = sm.cleanupAndInit(0);
+
+    // Immediately call append — should wait, then no-op
+    await sm.appendUserEvent("Should not be written");
+
+    await initPromise;
+
+    // No writer created, no transcript
+    expect(sm.sessionDir).toBeNull();
+    expect(existsSync(oldDir)).toBe(false);
+    const entries = await import("node:fs/promises").then((fs) => fs.readdir(testDir));
+    expect(entries).toHaveLength(0);
+  });
+
+  it("append before cleanupAndInit in bare mode is no-op", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
+    const initPromise = sm.cleanupAndInit(30);
+
+    await sm.appendUserEvent("Bare mode no-op");
+
+    await initPromise;
+
+    expect(sm.sessionDir).toBeNull();
+    const entries = await import("node:fs/promises").then((fs) => fs.readdir(testDir));
+    expect(entries).toHaveLength(0);
+  });
+
+  it("multiple appends before init all wait and succeed", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    const initPromise = sm.cleanupAndInit(30);
+
+    // Fire multiple appends concurrently — all should wait
+    await Promise.all([
+      sm.appendUserEvent("First"),
+      sm.appendUserEvent("Second"),
+      sm.appendAssistantEvent("Reply"),
+    ]);
+
+    await initPromise;
+
+    const content = await readFile(join(sm.sessionDir!, "transcript.jsonl"), "utf-8");
+    expect(content).toContain("First");
+    expect(content).toContain("Second");
+    expect(content).toContain("Reply");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// switchSession (now async)
 // ---------------------------------------------------------------------------
 
 describe("SessionManager.switchSession", () => {
@@ -118,7 +194,7 @@ describe("SessionManager.switchSession", () => {
     await sm.cleanupAndInit(30);
 
     const newDir = join(testDir, "resumed-session");
-    sm.switchSession(newDir);
+    await sm.switchSession(newDir);
     expect(sm.sessionDir).toBe(newDir);
 
     await sm.appendUserEvent("After switch");
@@ -130,7 +206,7 @@ describe("SessionManager.switchSession", () => {
     await sm.cleanupAndInit(30);
 
     const newDir = join(testDir, "resumed-session");
-    sm.switchSession(newDir);
+    await sm.switchSession(newDir);
     expect(sm.sessionDir).toBe(newDir);
 
     await sm.appendUserEvent("No-op");
@@ -142,7 +218,7 @@ describe("SessionManager.switchSession", () => {
     await sm.cleanupAndInit(0);
 
     const newDir = join(testDir, "resumed-session");
-    sm.switchSession(newDir);
+    await sm.switchSession(newDir);
     expect(sm.sessionDir).toBe(newDir);
 
     await sm.appendUserEvent("No-op");

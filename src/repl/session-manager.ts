@@ -1,6 +1,7 @@
 // SessionManager — manages current session lifecycle in the REPL
 // Creates TranscriptWriter, writes user/assistant events, tracks current sessionDir
 // Handles cleanup and persistence modes (bare, cleanupPeriodDays=0)
+// Guarantees: append operations wait for initialization to complete before writing
 
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,11 +19,12 @@ export interface SessionManagerOptions {
 export class SessionManager {
   private readonly sessionsBase: string;
   private readonly enabled: boolean;
-  private _writable = false; // false when bare mode or cleanupPeriodDays=0
+  private _writable = false;
   private writer: TranscriptWriter | null = null;
   private _sessionDir: string | null = null;
   private _sessionId: string | null = null;
   private _initialized = false;
+  private _initPromise: Promise<void> | null = null;
 
   constructor(options?: SessionManagerOptions) {
     this.sessionsBase = options?.sessionsBase ?? DEFAULT_SESSIONS_BASE;
@@ -30,48 +32,65 @@ export class SessionManager {
   }
 
   /**
-   * Initialize session lifecycle in correct order:
-   * 1. Cleanup expired sessions (awaited, not fire-and-forget)
-   * 2. If cleanupPeriodDays=0 or enabled=false → no writer (bare-like)
-   * 3. Otherwise create session dir and writer
-   *
-   * Must be called once at REPL startup. Idempotent.
+   * Start initialization lifecycle (non-blocking).
+   * Returns immediately; use ensureInitialized() to wait.
+   * Idempotent: second call is no-op.
    */
-  async cleanupAndInit(cleanupPeriodDays: number = 30): Promise<void> {
-    if (this._initialized) return;
-    this._initialized = true;
+  cleanupAndInit(cleanupPeriodDays: number = 30): Promise<void> {
+    if (this._initPromise) return this._initPromise;
 
-    // Step 1: Cleanup expired sessions (awaited)
-    if (this.enabled) {
-      await cleanupSessions({
-        sessionsBase: this.sessionsBase,
-        cleanupPeriodDays,
+    this._initPromise = (async () => {
+      // Step 1: Cleanup expired sessions (awaited)
+      if (this.enabled) {
+        await cleanupSessions({
+          sessionsBase: this.sessionsBase,
+          cleanupPeriodDays,
+        });
+      }
+
+      // Step 2: If cleanupPeriodDays=0 or bare mode → no writer for current session
+      if (!this.enabled || cleanupPeriodDays === 0) {
+        this._initialized = true;
+        return;
+      }
+
+      // Step 3: Create new session with writer
+      this._writable = true;
+      this._sessionId = new Date().toISOString().replace(/[:.]/g, "-");
+      this._sessionDir = join(this.sessionsBase, this._sessionId);
+      this.writer = new TranscriptWriter({
+        sessionDir: this._sessionDir,
+        enabled: true,
       });
-    }
+      this._initialized = true;
+    })();
 
-    // Step 2: If cleanupPeriodDays=0 or bare mode → no writer for current session
-    if (!this.enabled || cleanupPeriodDays === 0) {
-      return; // No session, no writer
-    }
+    return this._initPromise;
+  }
 
-    // Step 3: Create new session with writer
-    this._writable = true;
-    this._sessionId = new Date().toISOString().replace(/[:.]/g, "-");
-    this._sessionDir = join(this.sessionsBase, this._sessionId);
-    this.writer = new TranscriptWriter({
-      sessionDir: this._sessionDir,
-      enabled: true,
-    });
+  /**
+   * Ensure initialization has completed before proceeding.
+   * All append/switch operations call this to guarantee no race.
+   */
+  async ensureInitialized(): Promise<void> {
+    if (this._initialized) return;
+    if (this._initPromise) {
+      await this._initPromise;
+      return;
+    }
+    // If cleanupAndInit was never called, initialize with defaults
+    await this.cleanupAndInit(30);
   }
 
   /**
    * Switch to an existing session (e.g. after /resume).
-   * If not writable (bare mode or cleanupPeriodDays=0), only updates runtime state.
+   * Waits for initialization first.
    */
-  switchSession(sessionDir: string): void {
+  async switchSession(sessionDir: string): Promise<void> {
+    await this.ensureInitialized();
     this._sessionDir = sessionDir;
     this._sessionId = sessionDir.split("/").pop() ?? sessionDir;
-    if (!this._writable) return; // bare mode or cleanupPeriodDays=0: no writer
+    if (!this._writable) return;
     this.writer = new TranscriptWriter({
       sessionDir,
       enabled: true,
@@ -80,9 +99,10 @@ export class SessionManager {
 
   /**
    * Append a user event to the transcript.
-   * No-op if writer is null (bare mode, cleanupPeriodDays=0, or not initialized).
+   * Waits for initialization first — no race with cleanup.
    */
   async appendUserEvent(content: string): Promise<void> {
+    await this.ensureInitialized();
     if (!this.writer) return;
     const event: TranscriptEvent = {
       uuid: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -95,8 +115,10 @@ export class SessionManager {
 
   /**
    * Append an assistant event to the transcript.
+   * Waits for initialization first.
    */
   async appendAssistantEvent(content: string): Promise<void> {
+    await this.ensureInitialized();
     if (!this.writer) return;
     const event: TranscriptEvent = {
       uuid: `assistant-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -109,8 +131,10 @@ export class SessionManager {
 
   /**
    * Append a system event to the transcript.
+   * Waits for initialization first.
    */
   async appendSystemEvent(content: string): Promise<void> {
+    await this.ensureInitialized();
     if (!this.writer) return;
     const event: TranscriptEvent = {
       uuid: `system-${Date.now()}-${Math.random().toString(36).slice(2)}`,
