@@ -16,7 +16,8 @@ import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
 import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
 import { setAgentContext } from "../tools/builtin/agent.js";
 import { createPermissionChecker } from "../permissions/checker.js";
-import { parseRule } from "../permissions/rules.js";
+import { parseRule, type PermissionRule } from "../permissions/rules.js";
+import { getPermissionRules } from "../commands/builtin/permissions.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -57,6 +58,9 @@ export function ReplApp({
   // QueryEngine — initialized async with prompt assembly
   const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
   const engineInitRef = useRef<Promise<void> | null>(null);
+  // Store toolRegistry and permissionChecker refs for resume/rewind callbacks
+  const toolRegistryRef = useRef<ReturnType<typeof createBuiltinRegistry> | null>(null);
+  const permissionCheckerRef = useRef<ReturnType<typeof createPermissionChecker> | null>(null);
 
   // Initialize session + build system prompt + create QueryEngine
   useEffect(() => {
@@ -68,14 +72,24 @@ export function ReplApp({
       const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
       const toolRegistry = createBuiltinRegistry();
       const toolContext = { cwd };
-      // Build permission checker from config rules
-      const rulesConfig = commandContext.config?.rules as string[] | undefined;
-      const rules = (rulesConfig ?? []).map((r) => parseRule(r, "allow"));
+      // Build permission rules from config + runtime /permissions command
+      const permissionsConfig = commandContext.config?.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
+      const configRules: PermissionRule[] = [
+        ...(permissionsConfig?.deny ?? []).map((r) => parseRule(r, "deny")),
+        ...(permissionsConfig?.ask ?? []).map((r) => parseRule(r, "ask")),
+        ...(permissionsConfig?.allow ?? []).map((r) => parseRule(r, "allow")),
+      ];
+      // Merge with runtime /permissions rules
+      const runtimeRules = getPermissionRules();
+      const allRules = [...configRules, ...runtimeRules];
       const permissionChecker = createPermissionChecker({
         mode: (commandContext.config?.permissionMode as string as any) ?? "default",
-        rules,
+        rules: allRules,
         projectRoot: cwd,
       });
+      // Store refs for resume/rewind callbacks
+      toolRegistryRef.current = toolRegistry;
+      permissionCheckerRef.current = permissionChecker;
       engineRef.current = new QueryEngine(provider, {
         ...(systemPrompt ? { systemPrompt } : undefined),
         tools: toolRegistry.toProviderTools(),
@@ -122,7 +136,11 @@ export function ReplApp({
         compactMessages: () => {
           engine.compact();
         },
-        resumeSession: createResumeSession(engine, sm, sessionsBase, { provider }),
+        resumeSession: createResumeSession(engine, sm, sessionsBase, {
+          provider,
+          toolRegistry: toolRegistryRef.current ?? undefined,
+          permissionChecker: permissionCheckerRef.current ?? undefined,
+        }),
         rewindToEvent: createRewindToEvent(engine, sm, sessionsBase),
         config: {
           ...commandContext.config,
