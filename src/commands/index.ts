@@ -16,6 +16,7 @@ import { sessionCommand } from "./builtin/session.js";
 import { renameCommand } from "./builtin/rename.js";
 import { rewindCommand } from "./builtin/rewind.js";
 import { compactCommand } from "./builtin/compact.js";
+import { tasksCommand } from "./builtin/tasks.js";
 
 /**
  * Create a CommandRegistry with all builtin commands registered.
@@ -38,5 +39,6 @@ export function createDefaultRegistry(): CommandRegistry {
   registry.register(renameCommand);
   registry.register(rewindCommand);
   registry.register(compactCommand);
+  registry.register(tasksCommand);
   return registry;
 }

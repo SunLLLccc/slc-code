@@ -6,7 +6,9 @@ import { query, type QueryOptions } from "./query.js";
 import { ContextManager } from "../context/manager.js";
 import { compactMessages } from "../context/compact.js";
 import { buildReinjectMessages } from "../context/re-inject.js";
-import type { ContextState } from "../context/manager.js";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { PermissionChecker } from "../tools/scheduler.js";
+import type { ToolContext } from "../tools/base.js";
 
 export interface QueryEngineOptions {
   maxTurns?: number;
@@ -15,6 +17,12 @@ export interface QueryEngineOptions {
   systemPrompt?: string;
   /** Maximum tokens before auto-compact triggers */
   maxTokens?: number;
+  /** Tool registry for executing tool calls */
+  toolRegistry?: ToolRegistry;
+  /** Permission checker for tool execution */
+  permissionChecker?: PermissionChecker;
+  /** Tool context (cwd, etc.) */
+  toolContext?: ToolContext;
 }
 
 const DEFAULT_ENGINE_MAX_TURNS = 50;
@@ -26,6 +34,9 @@ export class QueryEngine {
   private readonly messages: ProviderMessage[] = [];
   private readonly systemPrompt: string | undefined;
   private readonly contextManager: ContextManager;
+  private readonly toolRegistry: ToolRegistry | undefined;
+  private readonly permissionChecker: PermissionChecker | undefined;
+  private readonly toolContext: ToolContext | undefined;
 
   constructor(provider: Provider, options?: QueryEngineOptions) {
     this.provider = provider;
@@ -33,6 +44,9 @@ export class QueryEngine {
     this.tools = options?.tools ?? [];
     this.systemPrompt = options?.systemPrompt;
     this.contextManager = new ContextManager(options?.maxTokens);
+    this.toolRegistry = options?.toolRegistry;
+    this.permissionChecker = options?.permissionChecker;
+    this.toolContext = options?.toolContext;
   }
 
   /**
@@ -56,6 +70,9 @@ export class QueryEngine {
     const options: QueryOptions = {
       maxTurns: this.maxTurns,
       tools: this.tools,
+      toolRegistry: this.toolRegistry,
+      permissionChecker: this.permissionChecker,
+      toolContext: this.toolContext,
     };
 
     let assistantText = "";
@@ -97,8 +114,6 @@ export class QueryEngine {
 
   /**
    * Compact conversation history.
-   * Preserves system messages and last 10 non-system messages.
-   * Re-injects context state (current file, plan, etc).
    */
   compact(): void {
     this.performCompact();

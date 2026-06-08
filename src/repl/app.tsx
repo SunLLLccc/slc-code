@@ -13,6 +13,11 @@ import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 import { assembleSystemPrompt } from "../prompt/assembly.js";
 import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
 import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
+import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
+import { setAgentContext } from "../tools/builtin/agent.js";
+import { createPermissionChecker } from "../permissions/checker.js";
+import { parseRule, type PermissionRule } from "../permissions/rules.js";
+import { getPermissionRules } from "../commands/builtin/permissions.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -53,6 +58,9 @@ export function ReplApp({
   // QueryEngine — initialized async with prompt assembly
   const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
   const engineInitRef = useRef<Promise<void> | null>(null);
+  // Store toolRegistry and permissionChecker refs for resume/rewind callbacks
+  const toolRegistryRef = useRef<ReturnType<typeof createBuiltinRegistry> | null>(null);
+  const permissionCheckerRef = useRef<ReturnType<typeof createPermissionChecker> | null>(null);
 
   // Initialize session + build system prompt + create QueryEngine
   useEffect(() => {
@@ -60,12 +68,54 @@ export function ReplApp({
     const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
     const userConfigDir = join(homedir(), ".slc");
 
+    // Initialize tools and permissions FIRST (always available, even if prompt fails)
+    const toolRegistry = createBuiltinRegistry();
+    const toolContext = { cwd };
+    const permissionsConfig = commandContext.config?.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
+    const configRules: PermissionRule[] = [
+      ...(permissionsConfig?.deny ?? []).map((r) => parseRule(r, "deny")),
+      ...(permissionsConfig?.ask ?? []).map((r) => parseRule(r, "ask")),
+      ...(permissionsConfig?.allow ?? []).map((r) => parseRule(r, "allow")),
+    ];
+    const permissionChecker = createPermissionChecker({
+      mode: (commandContext.config?.permissionMode as string as any) ?? "default",
+      rules: configRules,
+      projectRoot: cwd,
+      getRuntimeRules: () => getPermissionRules(),
+    });
+    toolRegistryRef.current = toolRegistry;
+    permissionCheckerRef.current = permissionChecker;
+
+    // Then build system prompt (may fail — fallback only degrades prompt, not tools)
     engineInitRef.current = sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
-      const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
-      if (systemPrompt) {
-        engineRef.current = new QueryEngine(provider, { systemPrompt });
+      let systemPrompt: string | undefined;
+      try {
+        systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
+      } catch {
+        // Prompt assembly failed — continue without system prompt
       }
-    }).catch(() => { /* fallback: use default engine without system prompt */ });
+      engineRef.current = new QueryEngine(provider, {
+        ...(systemPrompt ? { systemPrompt } : undefined),
+        tools: toolRegistry.toProviderTools(),
+        toolRegistry,
+        toolContext,
+        permissionChecker,
+      });
+      setAgentContext({
+        provider,
+        sessionDir: sm.sessionDir ?? cwd,
+        toolRegistry,
+        permissionChecker,
+      });
+    }).catch(() => {
+      // Even if session init fails, create engine with tools
+      engineRef.current = new QueryEngine(provider, {
+        tools: toolRegistry.toProviderTools(),
+        toolRegistry,
+        toolContext,
+        permissionChecker,
+      });
+    });
 
     return () => {
       sm.close();
@@ -95,7 +145,11 @@ export function ReplApp({
         compactMessages: () => {
           engine.compact();
         },
-        resumeSession: createResumeSession(engine, sm, sessionsBase),
+        resumeSession: createResumeSession(engine, sm, sessionsBase, {
+          provider,
+          toolRegistry: toolRegistryRef.current ?? undefined,
+          permissionChecker: permissionCheckerRef.current ?? undefined,
+        }),
         rewindToEvent: createRewindToEvent(engine, sm, sessionsBase),
         config: {
           ...commandContext.config,

@@ -9,18 +9,23 @@ import {
   getAvailableSessions,
   rebuildSessionState,
 } from "../session/resume.js";
+import { setAgentContext } from "../tools/builtin/agent.js";
+import type { Provider } from "../engine/providers/base.js";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { PermissionChecker } from "../tools/scheduler.js";
 
 const DEFAULT_SESSIONS_BASE = join(homedir(), ".slc", "sessions");
 
 /**
  * Create a resumeSession callback for CommandContext.
  * Loads transcript, rebuilds ProviderMessages, loads into QueryEngine,
- * AND updates SessionManager to track the resumed session as current.
+ * AND updates SessionManager + AgentTool sessionDir.
  */
 export function createResumeSession(
   engine: QueryEngine,
   sessionManager: SessionManager,
   sessionsBase: string = DEFAULT_SESSIONS_BASE,
+  options?: { provider?: Provider; toolRegistry?: ToolRegistry; permissionChecker?: PermissionChecker },
 ): (sessionDir: string) => Promise<boolean> {
   return async (sessionDir: string): Promise<boolean> => {
     const result = await loadTranscript(sessionDir);
@@ -31,6 +36,15 @@ export function createResumeSession(
     engine.loadMessages(messages);
     // Update SessionManager to track resumed session as current
     await sessionManager.switchSession(sessionDir);
+    // Update AgentTool context — preserve parent toolRegistry and permissionChecker
+    if (options?.provider) {
+      setAgentContext({
+        provider: options.provider,
+        sessionDir,
+        toolRegistry: options.toolRegistry,
+        permissionChecker: options.permissionChecker,
+      });
+    }
     return true;
   };
 }
