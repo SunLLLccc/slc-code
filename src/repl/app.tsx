@@ -12,8 +12,7 @@ import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 import { assembleSystemPrompt } from "../prompt/assembly.js";
 import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
-import { extractMemories } from "../memory/auto-memory.js";
-import { writeAutoMemories } from "../memory/auto-memory-store.js";
+import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -156,19 +155,16 @@ export function ReplApp({
         const sm = sessionManagerRef.current;
         await persistSessionMemory(engine.getMessages(), sm.sessionDir, sm.isEnabled);
         // Auto-memory extraction → write to memoryDir
-        // Respect memory.autoMemoryEnabled, session.persistenceEnabled, cleanupPeriodDays
+        // Priority: config.memoryDir > project {cwd}/.slc/memory (no user fallback)
         const memoryConfig = commandContext.config?.memory as { autoMemoryEnabled?: boolean } | undefined;
-        const autoMemoryEnabled = memoryConfig?.autoMemoryEnabled ?? true;
-        if (sm.isEnabled && autoMemoryEnabled && cleanupPeriodDays !== 0) {
-          const memories = extractMemories(`user: ${query}\nassistant: ${responseText}`);
-          if (memories.length > 0) {
-            // Priority: explicit config.memoryDir > project .slc/memory > user ~/.slc/memory
-            const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
-            const memoryDir = (commandContext.config?.memoryDir as string)
-              ?? join(cwd, ".slc", "memory");
-            await writeAutoMemories(memoryDir, memories, { enabled: true });
-          }
-        }
+        const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
+        await processAutoMemory(query, responseText, {
+          persistenceEnabled: sm.isEnabled,
+          autoMemoryEnabled: memoryConfig?.autoMemoryEnabled ?? true,
+          cleanupPeriodDays,
+          cwd,
+          memoryDir: commandContext.config?.memoryDir as string | undefined,
+        });
       }
     } catch (e) {
       addOutput(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
