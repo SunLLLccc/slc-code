@@ -30,5 +30,13 @@ export function buildReinjectMessages(state: ContextState): ProviderMessage[] {
     });
   }
 
+  if (state.toolDeclarations && Object.keys(state.toolDeclarations).length > 0) {
+    const toolNames = Object.keys(state.toolDeclarations).join(", ");
+    messages.push({
+      role: "system",
+      content: `Available tools: ${toolNames}`,
+    });
+  }
+
   return messages;
 }
