@@ -2,15 +2,21 @@
 // slc-code CLI entry point
 //
 // Bootstrap layer: handles fast-path flags (--version, --bare) and
-// delegates to the full setup/repl pipeline.
+// delegates to the full setup → provider → execution pipeline.
 
 import { Command } from "commander";
 import { resolve as resolvePath } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { setup } from "../core/setup.js";
+import { createProvider } from "../engine/providers/factory.js";
+import { executePrint, executeStdin } from "../core/noninteractive.js";
+import { createDefaultRegistry } from "../commands/index.js";
+import { launchRepl } from "../repl/index.js";
 import { logger } from "../utils/logger.js";
 import { SlcError, errorMessage } from "../utils/errors.js";
+import type { Provider } from "../engine/providers/base.js";
+import type { CommandContext } from "../commands/registry.js";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -40,20 +46,42 @@ export const EXIT_CODE = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// Dependency injection for testability
+// ---------------------------------------------------------------------------
+
+export interface CliDependencies {
+  /** Create a Provider from resolved config. Defaults to createProvider. */
+  createProviderFn?: typeof createProvider;
+  /** Execute --print query. Defaults to executePrint. */
+  executePrintFn?: typeof executePrint;
+  /** Execute --stdin query. Defaults to executeStdin. */
+  executeStdinFn?: typeof executeStdin;
+  /** Launch REPL. Defaults to launchRepl. */
+  launchReplFn?: typeof launchRepl;
+}
+
+// ---------------------------------------------------------------------------
 // CLI program
 // ---------------------------------------------------------------------------
 
 /**
  * Create the Commander program.
  *
+ * @param deps Optional dependency injection for testing.
  * @param actionExitCode A Promise resolver. The action handler resolves it
  *   with the desired exit code instead of calling process.exit(), making
  *   the program testable.
  */
 export function createProgram(
+  deps: CliDependencies = {},
   actionExitCode?: { resolve: (code: number) => void },
 ): Command {
   const version = getVersion();
+
+  const doCreateProvider = deps.createProviderFn ?? createProvider;
+  const doExecutePrint = deps.executePrintFn ?? executePrint;
+  const doExecuteStdin = deps.executeStdinFn ?? executeStdin;
+  const doLaunchRepl = deps.launchReplFn ?? launchRepl;
 
   const program = new Command();
 
@@ -81,35 +109,91 @@ export function createProgram(
       });
 
       if (result.ok === false) {
-        logger.error(`Setup failed: ${result.error.message}`);
+        process.stderr.write(`Error: ${result.error.message}\n`);
         actionExitCode?.resolve(EXIT_CODE.ERROR);
         return;
       }
 
-      const { config, provider } = result.value;
+      const { config, provider: resolved } = result.value;
+      const model = config.modelOverride ?? config.model ?? resolved.defaultModel;
 
+      // --print: non-interactive single query
       if (options.print) {
-        process.stdout.write(
-          `[slc] --print mode requested with model ${provider.defaultModel}, but no provider connected yet (P2).\n`,
-        );
-        actionExitCode?.resolve(EXIT_CODE.SUCCESS);
+        try {
+          const provider = doCreateProvider({
+            provider: resolved,
+            model,
+          });
+          const printResult = await doExecutePrint(provider, options.print);
+
+          if (printResult.hasError) {
+            process.stderr.write(`Error: ${printResult.errorMessage}\n`);
+            actionExitCode?.resolve(EXIT_CODE.ERROR);
+            return;
+          }
+
+          process.stdout.write(printResult.text);
+          if (printResult.text && !printResult.text.endsWith("\n")) {
+            process.stdout.write("\n");
+          }
+          actionExitCode?.resolve(EXIT_CODE.SUCCESS);
+        } catch (e) {
+          process.stderr.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
+          actionExitCode?.resolve(EXIT_CODE.ERROR);
+        }
         return;
       }
 
+      // --stdin: non-interactive from pipe
       if (options.stdin) {
-        process.stdout.write(
-          `[slc] --stdin mode requested, but no provider connected yet (P2).\n`,
-        );
-        actionExitCode?.resolve(EXIT_CODE.SUCCESS);
+        try {
+          const provider = doCreateProvider({
+            provider: resolved,
+            model,
+          });
+          const stdinResult = await doExecuteStdin(provider);
+
+          if (stdinResult.hasError) {
+            process.stderr.write(`Error: ${stdinResult.errorMessage}\n`);
+            actionExitCode?.resolve(EXIT_CODE.ERROR);
+            return;
+          }
+
+          process.stdout.write(stdinResult.text);
+          if (stdinResult.text && !stdinResult.text.endsWith("\n")) {
+            process.stdout.write("\n");
+          }
+          actionExitCode?.resolve(EXIT_CODE.SUCCESS);
+        } catch (e) {
+          process.stderr.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
+          actionExitCode?.resolve(EXIT_CODE.ERROR);
+        }
         return;
       }
 
-      // Default: would launch REPL here (P1+).
-      // For now, print a placeholder.
-      logger.info(
-        `slc v${version} | provider: ${provider.name} | model: ${provider.defaultModel} | bare: ${config.bare ?? false}`,
-      );
-      actionExitCode?.resolve(EXIT_CODE.SUCCESS);
+      // Default: interactive REPL
+      try {
+        const provider = doCreateProvider({
+          provider: resolved,
+          model,
+        });
+        const registry = createDefaultRegistry();
+        const ctx: CommandContext = {
+          model,
+          config: config as unknown as Record<string, unknown>,
+        };
+
+        await doLaunchRepl({
+          provider,
+          commandRegistry: registry,
+          commandContext: ctx,
+          model,
+        });
+        actionExitCode?.resolve(EXIT_CODE.SUCCESS);
+      } catch (e) {
+        process.stderr.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
+        actionExitCode?.resolve(EXIT_CODE.ERROR);
+      }
     });
 
   return program;
@@ -134,7 +218,7 @@ export async function main(argv: string[]): Promise<number> {
     resolveAction = resolve;
   });
 
-  const program = createProgram({ resolve: resolveAction });
+  const program = createProgram({}, { resolve: resolveAction });
 
   try {
     await program.parseAsync(argv, { from: "node" });
