@@ -80,7 +80,9 @@ function cleanValue(value: unknown, depth: number): unknown {
     const entries = Object.entries(value as Record<string, unknown>);
     const cleaned: Record<string, unknown> = {};
     for (const [k, v] of entries) {
-      cleaned[k] = cleanValue(v, depth + 1);
+      // Clean both keys and values (PRD 16.1: all strings including keys)
+      const cleanedKey = stripChars(k.normalize("NFKC"));
+      cleaned[cleanedKey] = cleanValue(v, depth + 1);
     }
     return cleaned;
   }

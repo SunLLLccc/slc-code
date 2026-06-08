@@ -6,6 +6,7 @@ import { query, type QueryOptions } from "./query.js";
 import { ContextManager } from "../context/manager.js";
 import { compactMessages } from "../context/compact.js";
 import { buildReinjectMessages } from "../context/re-inject.js";
+import { sanitizeUnicode } from "../security/unicode.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { PermissionChecker } from "../tools/scheduler.js";
 import type { ToolContext } from "../tools/base.js";
@@ -60,7 +61,9 @@ export class QueryEngine {
       this.messages.unshift({ role: "system", content: this.systemPrompt });
     }
 
-    this.messages.push({ role: "user", content: userMessage });
+    // Sanitize user input — PRD 16.1: all user input enters prompt after Unicode cleaning
+    const sanitizedMessage = sanitizeUnicode(userMessage);
+    this.messages.push({ role: "user", content: sanitizedMessage });
 
     // Auto-compact check
     if (this.contextManager.shouldCompact(this.messages)) {
