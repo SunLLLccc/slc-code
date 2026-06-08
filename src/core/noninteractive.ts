@@ -3,6 +3,7 @@
 import type { Provider } from "../engine/providers/base.js";
 import { QueryEngine } from "../engine/engine.js";
 import type { StreamEvent } from "../engine/types.js";
+import { assembleSystemPrompt } from "../prompt/assembly.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,9 +31,13 @@ export interface NonInteractiveResult {
 export async function executePrint(
   provider: Provider,
   query: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; cwd?: string; userConfigDir?: string },
 ): Promise<NonInteractiveResult> {
-  const engine = new QueryEngine(provider);
+  const systemPrompt = await assembleSystemPrompt({
+    cwd: options?.cwd,
+    userConfigDir: options?.userConfigDir,
+  });
+  const engine = new QueryEngine(provider, systemPrompt ? { systemPrompt } : undefined);
   const events: StreamEvent[] = [];
   let hasError = false;
   let errorMessage: string | undefined;

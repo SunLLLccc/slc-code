@@ -10,9 +10,7 @@ import type { StreamEvent } from "../engine/types.js";
 import type { CommandRegistry, CommandContext } from "../commands/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
-import { buildSystemPrompt } from "../prompt/system-prompt.js";
-import { loadRules } from "../prompt/rules-loader.js";
-import { loadMemories, formatMemoriesForPrompt } from "../memory/recall.js";
+import { assembleSystemPrompt } from "../prompt/assembly.js";
 import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
 
 // ---------------------------------------------------------------------------
@@ -51,9 +49,9 @@ export function ReplApp({
     new SessionManager({ sessionsBase, enabled: persistenceEnabled }),
   );
 
-  // Build system prompt from rules + memory (once at init)
-  const [systemPromptReady, setSystemPromptReady] = useState(false);
-  const engineRef = useRef<QueryEngine | null>(null);
+  // QueryEngine — initialized async with prompt assembly
+  const engineRef = useRef<QueryEngine>(new QueryEngine(provider));
+  const engineInitRef = useRef<Promise<void> | null>(null);
 
   // Initialize session + build system prompt + create QueryEngine
   useEffect(() => {
@@ -61,24 +59,12 @@ export function ReplApp({
     const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
     const userConfigDir = join(homedir(), ".slc");
 
-    sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
-      // Build system prompt with rules + memory
-      try {
-        const rules = await loadRules({ projectRoot: cwd, userConfigDir });
-        const memories = await loadMemories(join(userConfigDir, "memory"));
-        const memoryStr = formatMemoriesForPrompt(memories);
-        const systemPrompt = await buildSystemPrompt({ rules, memory: memoryStr });
+    engineInitRef.current = sm.cleanupAndInit(cleanupPeriodDays).then(async () => {
+      const systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
+      if (systemPrompt) {
         engineRef.current = new QueryEngine(provider, { systemPrompt });
-      } catch {
-        // Fallback: no rules/memory
-        engineRef.current = new QueryEngine(provider);
       }
-      setSystemPromptReady(true);
-    }).catch(() => {
-      // Fallback: init failed
-      engineRef.current = new QueryEngine(provider);
-      setSystemPromptReady(true);
-    });
+    }).catch(() => { /* fallback: use default engine without system prompt */ });
 
     return () => {
       sm.close();
@@ -91,9 +77,10 @@ export function ReplApp({
 
   const handleCommand = useCallback(
     async (cmd: string): Promise<boolean> => {
+      // Wait for engine initialization to complete
+      if (engineInitRef.current) await engineInitRef.current;
       const sm = sessionManagerRef.current;
       const engine = engineRef.current;
-      if (!engine) return false;
 
       const ctx: CommandContext = {
         ...commandContext,
@@ -137,11 +124,9 @@ export function ReplApp({
       return;
     }
 
+    // Wait for engine initialization to complete
+    if (engineInitRef.current) await engineInitRef.current;
     const engine = engineRef.current;
-    if (!engine) {
-      addOutput("Engine not ready yet...");
-      return;
-    }
 
     // Write user event to transcript
     await sessionManagerRef.current.appendUserEvent(query);
