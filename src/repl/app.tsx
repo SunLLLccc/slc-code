@@ -50,6 +50,7 @@ import { BottomBar } from "./components/BottomBar.js";
 import { InputLine } from "./components/InputLine.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { ToolStatusLine } from "./components/ToolStatus.js";
+import { MarkdownBlock } from "./components/MarkdownBlock.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -65,6 +66,10 @@ export interface ReplAppProps {
 // ---------------------------------------------------------------------------
 // ReplApp
 // ---------------------------------------------------------------------------
+
+// Streaming throttle constants (module-level to avoid re-creation on render)
+const THROTTLE_MS = 80;
+const DEGRADATION_THRESHOLD = 10000;
 
 export function ReplApp({
   provider,
@@ -97,6 +102,11 @@ export function ReplApp({
 
   // AbortController ref for cancelling in-flight queries
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Streaming throttle
+  const prevBufferRef = useRef<string>("");
+  const lastRenderRef = useRef(0);
+  const degradedRef = useRef(false);
 
   // Session manager — tracks current session, writes transcript
   const sessionConfig = commandContext.config?.session as { persistenceEnabled?: boolean; cleanupPeriodDays?: number } | undefined;
@@ -288,6 +298,10 @@ export function ReplApp({
     setStreaming(true);
     setEstimatedOutputTokens(0);
     let responseText = "";
+    // Reset streaming buffer
+    prevBufferRef.current = "";
+    degradedRef.current = false;
+    lastRenderRef.current = 0;
     // Track tool line index in output for status updates
     const toolLineIndices = new Map<string, number>();
 
@@ -299,7 +313,33 @@ export function ReplApp({
         if (event.type === "text_delta") {
           responseText += event.text;
           // Estimate tokens from character count (~4 chars per token)
-          setEstimatedOutputTokens(Math.ceil(responseText.length / 4));
+          const charCount = responseText.length;
+          setEstimatedOutputTokens(Math.floor(charCount / 4));
+
+          // Accumulate in buffer
+          const newBuffer = (prevBufferRef.current ?? "") + event.text;
+          prevBufferRef.current = newBuffer;
+
+          // Throttle re-render
+          const now = Date.now();
+          const forceRender = event.text.includes("\n");
+          if (forceRender || now - lastRenderRef.current >= THROTTLE_MS) {
+            lastRenderRef.current = now;
+
+            // Mark degraded if buffer exceeds threshold
+            if (!degradedRef.current && newBuffer.length > DEGRADATION_THRESHOLD) {
+              degradedRef.current = true;
+            }
+
+            setOutput((prev) => {
+              const lastIdx = prev.length - 1;
+              const last = prev[lastIdx];
+              if (last?.type === "assistant") {
+                return [...prev.slice(0, lastIdx), { ...last, content: newBuffer }];
+              }
+              return [...prev, createAssistantLine(newBuffer)];
+            });
+          }
         }
         if (event.type === "tool_call_start") {
           // Create a tool line and track its index
@@ -345,7 +385,19 @@ export function ReplApp({
       }
 
       if (responseText) {
-        addOutput(createAssistantLine(responseText));
+        // Flush: ensure final buffer content is rendered (throttle may have skipped last update)
+        setOutput((prev) => {
+          const lastIdx = prev.length - 1;
+          const last = prev[lastIdx];
+          if (last?.type === "assistant" && last.content === responseText) {
+            return prev; // already up to date
+          }
+          if (last?.type === "assistant") {
+            return [...prev.slice(0, lastIdx), { ...last, content: responseText }];
+          }
+          return [...prev, createAssistantLine(responseText)];
+        });
+
         // Write assistant event to transcript
         await sessionManagerRef.current.appendAssistantEvent(responseText);
         // Persist session memory if threshold reached
@@ -592,7 +644,14 @@ export function ReplApp({
             </Box>
           );
         }
-        // user, assistant, command, error, system lines render as Text
+        if (line.type === "assistant") {
+          // Skip markdown rendering for large content (degradation threshold)
+          if (line.content.length > DEGRADATION_THRESHOLD) {
+            return <Box key={i}><Text>{line.content}</Text></Box>;
+          }
+          return <MarkdownBlock key={i} content={line.content} />;
+        }
+        // user, command, error, system lines render as Text
         const color =
           line.type === "user" ? "white" :
           line.type === "command" ? "cyan" :
