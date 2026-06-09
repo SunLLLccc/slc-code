@@ -3,11 +3,11 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp } from "ink";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
 import type { StreamEvent } from "../engine/types.js";
-import type { CommandRegistry, CommandContext } from "../commands/registry.js";
+import type { CommandRegistry, CommandContext, Command } from "../commands/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
 import { assembleSystemPrompt } from "../prompt/assembly.js";
@@ -31,6 +31,27 @@ import type { McpServerConfig } from "../tools/mcp/client.js";
 import type { McpServerSetting } from "../config/settings.js";
 import { getSharedAuthCache } from "../tools/mcp/auth-cache.js";
 
+// New component and type imports
+import type {
+  OutputLine,
+} from "./output-types.js";
+import {
+  createUserLine,
+  createAssistantLine,
+  createToolLine,
+  updateToolStatus,
+  updateToolParams,
+  createErrorLine,
+  createCommandLine,
+  createSystemLine,
+} from "./output-types.js";
+import { TopBar } from "./components/TopBar.js";
+import { BottomBar } from "./components/BottomBar.js";
+import { InputLine } from "./components/InputLine.js";
+import { CommandPalette } from "./components/CommandPalette.js";
+import { ToolStatusLine } from "./components/ToolStatus.js";
+import { MarkdownBlock } from "./components/MarkdownBlock.js";
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
@@ -46,6 +67,10 @@ export interface ReplAppProps {
 // ReplApp
 // ---------------------------------------------------------------------------
 
+// Streaming throttle constants (module-level to avoid re-creation on render)
+const THROTTLE_MS = 80;
+const DEGRADATION_THRESHOLD = 10000;
+
 export function ReplApp({
   provider,
   commandRegistry,
@@ -54,7 +79,7 @@ export function ReplApp({
 }: ReplAppProps) {
   const { exit } = useApp();
   const [input, setInput] = useState("");
-  const [output, setOutput] = useState<string[]>([]);
+  const [output, setOutput] = useState<OutputLine[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [currentModel, setCurrentModel] = useState(initialModel ?? "");
   // Track pending AskUser questions for UI and input routing
@@ -62,6 +87,26 @@ export function ReplApp({
   const [pendingAsk, setPendingAsk] = useState<PendingQuestion | null>(null);
   const [askIndex, setAskIndex] = useState(0);
   const [askAnswers, setAskAnswers] = useState<string[]>([]);
+
+  // Command history
+  const [commandHistory, setCommandHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  // Command palette
+  const [showPalette, setShowPalette] = useState(false);
+  const [paletteFilter, setPaletteFilter] = useState("");
+  const [paletteIndex, setPaletteIndex] = useState(0);
+
+  // Token estimation
+  const [estimatedOutputTokens, setEstimatedOutputTokens] = useState(0);
+
+  // AbortController ref for cancelling in-flight queries
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Streaming throttle
+  const prevBufferRef = useRef<string>("");
+  const lastRenderRef = useRef(0);
+  const degradedRef = useRef(false);
 
   // Session manager — tracks current session, writes transcript
   const sessionConfig = commandContext.config?.session as { persistenceEnabled?: boolean; cleanupPeriodDays?: number } | undefined;
@@ -176,7 +221,7 @@ export function ReplApp({
     };
   }, []);
 
-  const addOutput = useCallback((line: string) => {
+  const addOutput = useCallback((line: OutputLine) => {
     setOutput((prev) => [...prev, line]);
   }, []);
 
@@ -213,7 +258,7 @@ export function ReplApp({
       };
 
       const result = await commandRegistry.dispatch(cmd, ctx);
-      addOutput(result);
+      addOutput(createCommandLine(result));
 
       return true;
     },
@@ -225,7 +270,12 @@ export function ReplApp({
     if (!query) return;
 
     setInput("");
-    addOutput(`> ${query}`);
+
+    // Add to command history
+    setCommandHistory((prev) => [...prev, query]);
+    setHistoryIndex(-1);
+
+    addOutput(createUserLine(`> ${query}`));
 
     // Check if it's a slash command
     if (query.startsWith("/")) {
@@ -240,23 +290,114 @@ export function ReplApp({
     // Write user event to transcript
     await sessionManagerRef.current.appendUserEvent(query);
 
+    // Create AbortController for this query
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     // Run through QueryEngine
     setStreaming(true);
+    setEstimatedOutputTokens(0);
     let responseText = "";
+    // Reset streaming buffer
+    prevBufferRef.current = "";
+    degradedRef.current = false;
+    lastRenderRef.current = 0;
+    // Track tool line index in output for status updates
+    const toolLineIndices = new Map<string, number>();
 
     try {
-      for await (const event of engine.query(query)) {
+      for await (const event of engine.query(query, { signal: abortController.signal })) {
+        // Check if aborted
+        if (abortController.signal.aborted) break;
+
         if (event.type === "text_delta") {
           responseText += event.text;
+          // Estimate tokens from character count (~4 chars per token)
+          const charCount = responseText.length;
+          setEstimatedOutputTokens(Math.floor(charCount / 4));
+
+          // Accumulate in buffer
+          const newBuffer = (prevBufferRef.current ?? "") + event.text;
+          prevBufferRef.current = newBuffer;
+
+          // Throttle re-render
+          const now = Date.now();
+          const forceRender = event.text.includes("\n");
+          if (forceRender || now - lastRenderRef.current >= THROTTLE_MS) {
+            lastRenderRef.current = now;
+
+            // Mark degraded if buffer exceeds threshold
+            if (!degradedRef.current && newBuffer.length > DEGRADATION_THRESHOLD) {
+              degradedRef.current = true;
+            }
+
+            setOutput((prev) => {
+              const lastIdx = prev.length - 1;
+              const last = prev[lastIdx];
+              if (last?.type === "assistant") {
+                return [...prev.slice(0, lastIdx), { ...last, content: newBuffer }];
+              }
+              return [...prev, createAssistantLine(newBuffer)];
+            });
+          }
+        }
+        if (event.type === "tool_call_start") {
+          // Create a tool line and track its index
+          const toolLine = createToolLine(event.id, event.name, "{}");
+          setOutput((prev) => {
+            toolLineIndices.set(event.id, prev.length);
+            return [...prev, toolLine];
+          });
+        }
+        if (event.type === "tool_call_args") {
+          // Update tool params for the tracked tool line
+          const idx = toolLineIndices.get(event.id);
+          if (idx !== undefined) {
+            setOutput((prev) => {
+              const updated = [...prev];
+              const existing = updated[idx];
+              if (existing) {
+                updated[idx] = updateToolParams(existing, event.args_json);
+              }
+              return updated;
+            });
+          }
+        }
+        if (event.type === "tool_call_result") {
+          // Update tool status to success/error
+          const idx = toolLineIndices.get(event.id);
+          if (idx !== undefined) {
+            setOutput((prev) => {
+              const updated = [...prev];
+              const existing = updated[idx];
+              if (existing) {
+                const state = event.isError ? "error" : "success";
+                updated[idx] = updateToolStatus(existing, state, event.result);
+              }
+              return updated;
+            });
+          }
         }
         if (event.type === "error") {
-          addOutput(`Error: ${event.error.message}`);
+          addOutput(createErrorLine(`Error: ${event.error.message}`));
         }
         if (event.type === "done") break;
       }
 
       if (responseText) {
-        addOutput(responseText);
+        // Flush: ensure final buffer content is rendered (throttle may have skipped last update)
+        setOutput((prev) => {
+          const lastIdx = prev.length - 1;
+          const last = prev[lastIdx];
+          if (last?.type === "assistant" && last.content === responseText) {
+            return prev; // already up to date
+          }
+          if (last?.type === "assistant") {
+            return [...prev.slice(0, lastIdx), { ...last, content: responseText }];
+          }
+          return [...prev, createAssistantLine(responseText)];
+        });
+
         // Write assistant event to transcript
         await sessionManagerRef.current.appendAssistantEvent(responseText);
         // Persist session memory if threshold reached
@@ -273,12 +414,24 @@ export function ReplApp({
           memoryDir: commandContext.config?.memoryDir as string | undefined,
         });
       }
+
+      // Show interrupted message if aborted
+      if (abortController.signal.aborted) {
+        addOutput(createSystemLine("Interrupted."));
+      }
     } catch (e) {
-      addOutput(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
+      // If aborted, show interrupted message instead of error
+      if (abortController.signal.aborted) {
+        addOutput(createSystemLine("Interrupted."));
+      } else {
+        addOutput(createErrorLine(`Fatal: ${e instanceof Error ? e.message : String(e)}`));
+      }
     } finally {
+      abortControllerRef.current = null;
       setStreaming(false);
+      setEstimatedOutputTokens(0);
     }
-  }, [input, provider, handleCommand, addOutput]);
+  }, [input, handleCommand, addOutput, cleanupPeriodDays, commandContext]);
 
   // Handle AskUser answer submission — collects answers one by one
   const handleAskSubmit = useCallback(() => {
@@ -295,14 +448,14 @@ export function ReplApp({
 
     if (currentIdx + 1 < totalQuestions) {
       // More questions to answer — show current answer, advance to next
-      addOutput(`[AskUser] Q${currentIdx + 1}: ${question.questions[currentIdx]}`);
-      addOutput(`[AskUser] A${currentIdx + 1}: ${answer}`);
+      addOutput(createSystemLine(`[AskUser] Q${currentIdx + 1}: ${question.questions[currentIdx]}`));
+      addOutput(createSystemLine(`[AskUser] A${currentIdx + 1}: ${answer}`));
       setAskAnswers(newAnswers);
       setAskIndex(currentIdx + 1);
     } else {
       // All questions answered — submit
-      addOutput(`[AskUser] Q${currentIdx + 1}: ${question.questions[currentIdx]}`);
-      addOutput(`[AskUser] A${currentIdx + 1}: ${answer}`);
+      addOutput(createSystemLine(`[AskUser] Q${currentIdx + 1}: ${question.questions[currentIdx]}`));
+      addOutput(createSystemLine(`[AskUser] A${currentIdx + 1}: ${answer}`));
       submitAskUserAnswers(question.id, newAnswers);
       setPendingAsk(null);
       setAskIndex(0);
@@ -317,12 +470,16 @@ export function ReplApp({
     setPendingAsk(null);
     setAskIndex(0);
     setAskAnswers([]);
-    addOutput("[AskUser] Cancelled");
+    addOutput(createSystemLine("[AskUser] Cancelled"));
   }, [pendingAsk, addOutput]);
 
   useInput((ch, key) => {
-    // ESC behavior: cancel AskUser if pending, otherwise exit app
-    if (key.escape) {
+    // Ctrl+C: abort if streaming, cancel if AskUser, exit otherwise
+    if (key.ctrl && ch === "c") {
+      if (streaming && abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        return;
+      }
       if (pendingAsk) {
         handleAskCancel();
         return;
@@ -331,13 +488,126 @@ export function ReplApp({
       return;
     }
 
-    // Enter behavior: submit AskUser answer if pending, otherwise normal submit
-    if (key.return) {
-      if (pendingAsk) {
+    // AskUser mode: all input goes to answer (highest priority after Ctrl+C)
+    if (pendingAsk) {
+      if (key.escape) {
+        handleAskCancel();
+        return;
+      }
+      if (key.return) {
         handleAskSubmit();
         return;
       }
+      if (key.backspace) {
+        setInput((prev) => prev.slice(0, -1));
+        return;
+      }
+      setInput((prev) => prev + ch);
+      return;
+    }
+
+    // Palette mode
+    if (showPalette) {
+      const commands = commandRegistry.list();
+      const filtered = commands.filter(
+        (cmd: Command) => cmd.name.includes(paletteFilter) || cmd.aliases?.some((a: string) => a.includes(paletteFilter)),
+      );
+
+      if (key.escape) {
+        setShowPalette(false);
+        setPaletteFilter("");
+        setPaletteIndex(0);
+        return;
+      }
+      if (key.upArrow) {
+        setPaletteIndex((prev) => Math.max(0, prev - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setPaletteIndex((prev) => Math.min(filtered.length - 1, prev + 1));
+        return;
+      }
+      if (key.tab) {
+        // Complete with selected command
+        if (filtered.length > 0) {
+          const selected = filtered[paletteIndex];
+          if (selected) {
+            setInput(`/${selected.name} `);
+          }
+          setShowPalette(false);
+          setPaletteFilter("");
+          setPaletteIndex(0);
+        }
+        return;
+      }
+      if (key.return) {
+        const inputName = input.startsWith("/") ? input.slice(1).trim() : input;
+        const selected = filtered[paletteIndex];
+
+        if (selected && commandRegistry.has(inputName) && inputName === selected.name) {
+          // Exact match — execute directly
+          setShowPalette(false);
+          setPaletteFilter("");
+          setPaletteIndex(0);
+          handleSubmit();
+        } else if (selected) {
+          // Prefix match — complete command name, don't execute
+          setInput(`/${selected.name} `);
+          setShowPalette(false);
+          setPaletteFilter("");
+          setPaletteIndex(0);
+        }
+        return;
+      }
+      // Regular typing in palette: update filter
+      if (ch && !key.ctrl && !key.meta) {
+        if (key.backspace) {
+          const newFilter = paletteFilter.slice(0, -1);
+          if (!newFilter && !input.startsWith("/")) {
+            setShowPalette(false);
+          }
+          setPaletteFilter(newFilter);
+          setPaletteIndex(0);
+          return;
+        }
+        setPaletteFilter((prev) => prev + ch);
+        setPaletteIndex(0);
+        return;
+      }
+      return;
+    }
+
+    // ESC behavior: exit app
+    if (key.escape) {
+      exit();
+      return;
+    }
+
+    // Enter behavior: normal submit
+    if (key.return) {
       handleSubmit();
+      return;
+    }
+
+    // History navigation on empty input
+    if (key.upArrow && input === "" && commandHistory.length > 0) {
+      const newIndex = historyIndex === -1
+        ? commandHistory.length - 1
+        : Math.max(0, historyIndex - 1);
+      setHistoryIndex(newIndex);
+      setInput(commandHistory[newIndex] ?? "");
+      return;
+    }
+    if (key.downArrow && input === "" && commandHistory.length > 0) {
+      if (historyIndex === -1) return;
+      const newIndex = historyIndex + 1;
+      if (newIndex >= commandHistory.length) {
+        setHistoryIndex(-1);
+        setInput("");
+      } else {
+        setHistoryIndex(newIndex);
+        setInput(commandHistory[newIndex] ?? "");
+      }
       return;
     }
 
@@ -346,16 +616,54 @@ export function ReplApp({
       return;
     }
 
+    // Detect "/" to open palette
+    if (ch === "/" && input === "") {
+      setInput("/");
+      setShowPalette(true);
+      setPaletteFilter("");
+      setPaletteIndex(0);
+      return;
+    }
+
     setInput((prev) => prev + ch);
   });
 
+  // Get sessionId from session manager
+  const sessionId = sessionManagerRef.current.sessionDir
+    ? basename(sessionManagerRef.current.sessionDir)
+    : null;
+
   return (
     <Box flexDirection="column">
-      {output.map((line, i) => (
-        <Box key={i}>
-          <Text>{line}</Text>
-        </Box>
-      ))}
+      <TopBar model={currentModel} sessionId={sessionId} />
+      {output.map((line, i) => {
+        if (line.type === "tool" && line.toolStatus) {
+          return (
+            <Box key={i}>
+              <ToolStatusLine status={line.toolStatus} />
+            </Box>
+          );
+        }
+        if (line.type === "assistant") {
+          // Skip markdown rendering for large content (degradation threshold)
+          if (line.content.length > DEGRADATION_THRESHOLD) {
+            return <Box key={i}><Text>{line.content}</Text></Box>;
+          }
+          return <MarkdownBlock key={i} content={line.content} />;
+        }
+        // user, command, error, system lines render as Text
+        const color =
+          line.type === "user" ? "white" :
+          line.type === "command" ? "cyan" :
+          line.type === "error" ? "red" :
+          line.type === "system" ? "dimColor" :
+          undefined;
+        return (
+          <Box key={i}>
+            <Text color={color}>{line.content}</Text>
+          </Box>
+        );
+      })}
       {streaming && (
         <Box>
           <Text dimColor>Thinking...</Text>
@@ -366,11 +674,19 @@ export function ReplApp({
           <Text color="yellow">[AskUser] ({askIndex + 1}/{pendingAsk.questions.length}) {pendingAsk.questions[askIndex]}</Text>
         </Box>
       )}
-      <Box>
-        <Text color="green">{pendingAsk ? "❓ " : "❯ "}</Text>
-        <Text>{input}</Text>
-        <Text dimColor>█</Text>
-      </Box>
+      {showPalette && (
+        <CommandPalette
+          commands={commandRegistry.list()}
+          filter={paletteFilter}
+          selectedIndex={paletteIndex}
+        />
+      )}
+      <InputLine value={input} isAskMode={!!pendingAsk} />
+      <BottomBar
+        inputTokens={0}
+        outputTokens={0}
+        estimatedOutputTokens={estimatedOutputTokens > 0 ? estimatedOutputTokens : undefined}
+      />
     </Box>
   );
 }
