@@ -55,7 +55,7 @@ export class QueryEngine {
    * Messages are accumulated across calls.
    * Auto-compacts if token budget exceeded.
    */
-  async *query(userMessage: string): AsyncGenerator<StreamEvent> {
+  async *query(userMessage: string, options?: { signal?: AbortSignal }): AsyncGenerator<StreamEvent> {
     // Inject system prompt if not already present
     if (this.systemPrompt && (this.messages.length === 0 || this.messages[0]?.role !== "system")) {
       this.messages.unshift({ role: "system", content: this.systemPrompt });
@@ -70,9 +70,10 @@ export class QueryEngine {
       this.performCompact();
     }
 
-    const options: QueryOptions = {
+    const queryOpts: QueryOptions = {
       maxTurns: this.maxTurns,
       tools: this.tools,
+      signal: options?.signal,
       toolRegistry: this.toolRegistry,
       permissionChecker: this.permissionChecker,
       toolContext: this.toolContext,
@@ -80,7 +81,7 @@ export class QueryEngine {
 
     let assistantText = "";
 
-    for await (const event of query(this.provider, this.messages, options)) {
+    for await (const event of query(this.provider, this.messages, queryOpts)) {
       if (event.type === "text_delta") {
         assistantText += event.text;
       }
