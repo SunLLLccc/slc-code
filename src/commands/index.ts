@@ -17,6 +17,13 @@ import { renameCommand } from "./builtin/rename.js";
 import { rewindCommand } from "./builtin/rewind.js";
 import { compactCommand } from "./builtin/compact.js";
 import { tasksCommand } from "./builtin/tasks.js";
+import { mcpCommand } from "./builtin/mcp.js";
+import { skillsCommand } from "./builtin/skills.js";
+import { agentsCommand } from "./builtin/agents.js";
+import { themeCommand } from "./builtin/theme.js";
+import { keybindingsCommand } from "./builtin/keybindings.js";
+import { planCommand } from "./builtin/plan.js";
+import { unplanCommand } from "./builtin/unplan.js";
 
 /**
  * Create a CommandRegistry with all builtin commands registered.
@@ -40,5 +47,13 @@ export function createDefaultRegistry(): CommandRegistry {
   registry.register(rewindCommand);
   registry.register(compactCommand);
   registry.register(tasksCommand);
+  // Phase 4
+  registry.register(mcpCommand);
+  registry.register(skillsCommand);
+  registry.register(agentsCommand);
+  registry.register(themeCommand);
+  registry.register(keybindingsCommand);
+  registry.register(planCommand);
+  registry.register(unplanCommand);
   return registry;
 }

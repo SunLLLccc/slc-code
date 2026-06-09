@@ -138,12 +138,25 @@ export async function* query(
     }));
 
     try {
-      const { results } = await scheduleToolCalls(
+      const { results, contextModifiers } = await scheduleToolCalls(
         schedulerCalls,
         registry,
         toolContext,
         permissionChecker,
       );
+
+      // Apply context modifiers (e.g. cwd, permissionMode changes from tools)
+      const ctxRecord = toolContext as unknown as Record<string, unknown>;
+      for (const modifier of contextModifiers) {
+        for (const [key, value] of Object.entries(modifier)) {
+          if (value === undefined) {
+            // Explicitly unset the key (e.g. worktreePath, worktreeName on exit)
+            delete ctxRecord[key];
+          } else {
+            ctxRecord[key] = value;
+          }
+        }
+      }
 
       // Inject tool results into conversation and yield events
       // Sanitize tool result content — PRD 16.1: external content enters prompt after Unicode cleaning
