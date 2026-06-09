@@ -125,9 +125,15 @@ export function createProgram(
             model,
           });
           const skipPromptAssembly = options.bare ?? false;
+          const mcpServers = config.mcpServers as Record<string, { transport: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }> | undefined;
+          const permissions = config.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
+          const permissionMode = config.permissionMode as string | undefined;
           const printResult = await doExecutePrint(provider, options.print, {
             cwd,
             skipPromptAssembly,
+            mcpServers,
+            permissions,
+            permissionMode,
           });
 
           if (printResult.hasError) {
@@ -156,9 +162,15 @@ export function createProgram(
             model,
           });
           const skipPromptAssembly = options.bare ?? false;
+          const mcpServers = config.mcpServers as Record<string, { transport: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }> | undefined;
+          const permissions = config.permissions as { allow?: string[]; deny?: string[]; ask?: string[] } | undefined;
+          const permissionMode = config.permissionMode as string | undefined;
           const stdinResult = await doExecuteStdin(provider, {
             cwd,
             skipPromptAssembly,
+            mcpServers,
+            permissions,
+            permissionMode,
           });
 
           if (stdinResult.hasError) {
