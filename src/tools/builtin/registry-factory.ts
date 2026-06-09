@@ -12,6 +12,15 @@ import { taskCreateTool } from "./task-create.js";
 import { taskGetTool } from "./task-get.js";
 import { taskListTool } from "./task-list.js";
 import { taskUpdateTool } from "./task-update.js";
+import { webFetchTool } from "./web-fetch.js";
+import { webSearchTool } from "./web-search.js";
+import { notebookEditTool } from "./notebook-edit.js";
+import { scheduleCronTool } from "./schedule-cron.js";
+import { skillTool } from "./skill.js";
+import { askUserTool } from "./ask-user.js";
+import { enterPlanModeTool, exitPlanModeTool } from "./plan-mode.js";
+import { enterWorktreeTool } from "./enter-worktree.js";
+import { exitWorktreeTool } from "./exit-worktree.js";
 
 /**
  * Create a ToolRegistry with all builtin tools registered.
@@ -37,6 +46,30 @@ export function createBuiltinRegistry(): ToolRegistry {
   registry.registerBuiltin(taskGetTool);
   registry.registerBuiltin(taskListTool);
   registry.registerBuiltin(taskUpdateTool);
+
+  // Web tools (Phase 4)
+  registry.registerBuiltin(webFetchTool);
+  registry.registerBuiltin(webSearchTool);
+
+  // Notebook tool (Phase 4)
+  registry.registerBuiltin(notebookEditTool);
+
+  // Schedule tool (Phase 4)
+  registry.registerBuiltin(scheduleCronTool);
+
+  // Skill tool (Phase 4)
+  registry.registerBuiltin(skillTool);
+
+  // Ask user tool (Phase 4)
+  registry.registerBuiltin(askUserTool);
+
+  // Plan mode tools (Phase 4)
+  registry.registerBuiltin(enterPlanModeTool);
+  registry.registerBuiltin(exitPlanModeTool);
+
+  // Worktree tools (Phase 4)
+  registry.registerBuiltin(enterWorktreeTool);
+  registry.registerBuiltin(exitWorktreeTool);
 
   return registry;
 }

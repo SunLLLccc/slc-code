@@ -50,6 +50,8 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** Permission mode. */
   permissionMode?: string;
+  /** Interactive user prompting callback — injected by the REPL/session layer. */
+  askUser?: (questions: string[]) => Promise<string[]>;
 }
 
 // ---------------------------------------------------------------------------

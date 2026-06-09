@@ -16,7 +16,15 @@ import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
 import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
 import { setAgentContext } from "../tools/builtin/agent.js";
 import { createPermissionChecker } from "../permissions/checker.js";
+import { getRuntimePermissionMode } from "../tools/builtin/plan-mode.js";
 import { parseRule, type PermissionRule } from "../permissions/rules.js";
+import {
+  createAskUserCallback,
+  getPendingQuestions,
+  submitAskUserAnswers,
+  cancelAskUser,
+  type PendingQuestion,
+} from "./ask-user-runtime.js";
 import { getPermissionRules } from "../commands/builtin/permissions.js";
 import { loadMcpToolsIntoRegistry, disconnectAll } from "../tools/mcp/loader.js";
 import type { McpServerConfig } from "../tools/mcp/client.js";
@@ -49,6 +57,11 @@ export function ReplApp({
   const [output, setOutput] = useState<string[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [currentModel, setCurrentModel] = useState(initialModel ?? "");
+  // Track pending AskUser questions for UI and input routing
+  // Supports multi-question: tracks current index and collected answers
+  const [pendingAsk, setPendingAsk] = useState<PendingQuestion | null>(null);
+  const [askIndex, setAskIndex] = useState(0);
+  const [askAnswers, setAskAnswers] = useState<string[]>([]);
 
   // Session manager — tracks current session, writes transcript
   const sessionConfig = commandContext.config?.session as { persistenceEnabled?: boolean; cleanupPeriodDays?: number } | undefined;
@@ -66,6 +79,25 @@ export function ReplApp({
   const toolRegistryRef = useRef<ReturnType<typeof createBuiltinRegistry> | null>(null);
   const permissionCheckerRef = useRef<ReturnType<typeof createPermissionChecker> | null>(null);
 
+  // Poll for pending AskUser questions
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const pending = getPendingQuestions();
+      if (pending.length > 0 && !pendingAsk) {
+        // New question arrived
+        setPendingAsk(pending[0]!);
+        setAskIndex(0);
+        setAskAnswers([]);
+      } else if (pending.length === 0 && pendingAsk) {
+        // Question resolved externally
+        setPendingAsk(null);
+        setAskIndex(0);
+        setAskAnswers([]);
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [pendingAsk]);
+
   // Initialize session + build system prompt + create QueryEngine
   useEffect(() => {
     const sm = sessionManagerRef.current;
@@ -74,7 +106,8 @@ export function ReplApp({
 
     // Initialize tools and permissions FIRST (always available, even if prompt fails)
     const toolRegistry = createBuiltinRegistry();
-    const toolContext = { cwd };
+    const askUserCallback = createAskUserCallback();
+    const toolContext = { cwd, askUser: askUserCallback, permissionMode: (commandContext.config?.permissionMode as string) ?? "default" };
     // Load MCP tools from config with shared auth cache
     const mcpServersConfig = commandContext.config?.mcpServers as Record<string, McpServerSetting> | undefined;
     const mcpAuthCache = getSharedAuthCache();
@@ -98,6 +131,7 @@ export function ReplApp({
       rules: configRules,
       projectRoot: cwd,
       getRuntimeRules: () => getPermissionRules(),
+      getRuntimeMode: () => getRuntimePermissionMode() as any,
     });
     toolRegistryRef.current = toolRegistry;
     permissionCheckerRef.current = permissionChecker;
@@ -229,7 +263,6 @@ export function ReplApp({
         const sm = sessionManagerRef.current;
         await persistSessionMemory(engine.getMessages(), sm.sessionDir, sm.isEnabled);
         // Auto-memory extraction → write to memoryDir
-        // Priority: config.memoryDir > project {cwd}/.slc/memory (no user fallback)
         const memoryConfig = commandContext.config?.memory as { autoMemoryEnabled?: boolean } | undefined;
         const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
         await processAutoMemory(query, responseText, {
@@ -247,13 +280,63 @@ export function ReplApp({
     }
   }, [input, provider, handleCommand, addOutput]);
 
+  // Handle AskUser answer submission — collects answers one by one
+  const handleAskSubmit = useCallback(() => {
+    const answer = input.trim();
+    if (!answer) return;
+
+    const question = pendingAsk;
+    if (!question) return;
+
+    setInput("");
+    const newAnswers = [...askAnswers, answer];
+    const currentIdx = askIndex;
+    const totalQuestions = question.questions.length;
+
+    if (currentIdx + 1 < totalQuestions) {
+      // More questions to answer — show current answer, advance to next
+      addOutput(`[AskUser] Q${currentIdx + 1}: ${question.questions[currentIdx]}`);
+      addOutput(`[AskUser] A${currentIdx + 1}: ${answer}`);
+      setAskAnswers(newAnswers);
+      setAskIndex(currentIdx + 1);
+    } else {
+      // All questions answered — submit
+      addOutput(`[AskUser] Q${currentIdx + 1}: ${question.questions[currentIdx]}`);
+      addOutput(`[AskUser] A${currentIdx + 1}: ${answer}`);
+      submitAskUserAnswers(question.id, newAnswers);
+      setPendingAsk(null);
+      setAskIndex(0);
+      setAskAnswers([]);
+    }
+  }, [input, pendingAsk, askIndex, askAnswers, addOutput]);
+
+  // Handle AskUser cancel — cancels entire pending ask
+  const handleAskCancel = useCallback(() => {
+    if (!pendingAsk) return;
+    cancelAskUser(pendingAsk.id);
+    setPendingAsk(null);
+    setAskIndex(0);
+    setAskAnswers([]);
+    addOutput("[AskUser] Cancelled");
+  }, [pendingAsk, addOutput]);
+
   useInput((ch, key) => {
+    // ESC behavior: cancel AskUser if pending, otherwise exit app
     if (key.escape) {
+      if (pendingAsk) {
+        handleAskCancel();
+        return;
+      }
       exit();
       return;
     }
 
+    // Enter behavior: submit AskUser answer if pending, otherwise normal submit
     if (key.return) {
+      if (pendingAsk) {
+        handleAskSubmit();
+        return;
+      }
       handleSubmit();
       return;
     }
@@ -278,8 +361,13 @@ export function ReplApp({
           <Text dimColor>Thinking...</Text>
         </Box>
       )}
+      {pendingAsk && (
+        <Box>
+          <Text color="yellow">[AskUser] ({askIndex + 1}/{pendingAsk.questions.length}) {pendingAsk.questions[askIndex]}</Text>
+        </Box>
+      )}
       <Box>
-        <Text color="green">❯ </Text>
+        <Text color="green">{pendingAsk ? "❓ " : "❯ "}</Text>
         <Text>{input}</Text>
         <Text dimColor>█</Text>
       </Box>

@@ -87,12 +87,19 @@ export interface PermissionCheckerOptions {
    * Merged with static rules: deny > ask > allow priority.
    */
   getRuntimeRules?: () => PermissionRule[];
+  /**
+   * Dynamic mode provider — called on each check to get current runtime mode.
+   * When provided, overrides the static `mode` field.
+   */
+  getRuntimeMode?: () => PermissionMode;
 }
 
 export function createPermissionChecker(options: PermissionCheckerOptions): PermissionChecker {
-  const { mode, rules: configRules, projectRoot, getRuntimeRules } = options;
+  const { mode, rules: configRules, projectRoot, getRuntimeRules, getRuntimeMode } = options;
 
   return (tool: Tool, input: ToolInput, context: ToolContext) => {
+    // Resolve the effective mode: runtime override > context > static config
+    const effectiveMode: PermissionMode = getRuntimeMode?.() ?? (context.permissionMode as PermissionMode) ?? mode;
     // 0. Project boundary enforcement for path-bearing tools
     if (PATH_TOOLS.has(tool.name) && typeof input.path === "string") {
       const resolved = resolveToolPath(input.path, context.cwd);
@@ -126,7 +133,7 @@ export function createPermissionChecker(options: PermissionCheckerOptions): Perm
     if (ruleResult === "ask") return "ask";
 
     // 3. Permission mode restrictions
-    const modeDecision = checkModePermission(mode, tool);
+    const modeDecision = checkModePermission(effectiveMode, tool);
     if (modeDecision === "deny") return "deny";
     if (modeDecision === "ask") {
       // 4. Explicit allow rules can override mode "ask"
