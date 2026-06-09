@@ -74,17 +74,33 @@ There is **no** `tool_execution_start` event. The scheduler runs synchronously b
 | StreamEvent | UI State | Display |
 |---|---|---|
 | `tool_call_start` | `pending` | `● toolName` (dim, waiting for args) |
-| `tool_call_args` (last chunk) | `pending` (with params) | `● toolName: paramSummary` (dim) |
+| `tool_call_args` (accumulated, JSON parseable) | `pending` (with params) | `● toolName: paramSummary` (dim) |
+| `tool_call_args` (accumulated, NOT parseable) | `pending` | `● toolName: args...` (dim) |
 | `tool_call_result` (success) | `success` | `✓ toolName: paramSummary (result summary)` (green) |
 | `tool_call_result` (isError) | `error` | `✗ toolName: paramSummary (error message)` (red) |
 
 **No `running` state.** Since there is no engine event for "tool is executing", we cannot display a true running indicator. The gap between the last `tool_call_args` and `tool_call_result` is the execution period, but we have no event to mark its start. Display remains `pending` (dim) until result arrives.
 
-#### Param Summary
+#### Param Summary Detection Rule
 
-Extracted from accumulated `tool_call_args` JSON:
-- First meaningful field value, truncated to 60 chars
-- Example: `{"command": "ls -la", "timeout": 5000}` → `ls -la`
+There is no "last chunk" marker for `tool_call_args`. The UI must detect argument completeness incrementally:
+
+1. On each `tool_call_args` event, append `args_json` to the tool call's accumulated buffer (keyed by `id`).
+2. After each append, attempt `JSON.parse(buffer)`.
+3. **If parse succeeds:** Extract param summary (see below). Update the tool line display.
+4. **If parse fails:** Keep displaying the previous parseable summary, or `args...` if never parsed. Do NOT display raw partial JSON.
+5. On `tool_call_result`: use the last successfully parsed summary. If never parsed, use `args...`.
+
+This ensures the UI never shows malformed JSON, and param display updates as soon as complete JSON is available.
+
+#### Param Summary Extraction
+
+From the parsed JSON object:
+- **Bash tool:** Extract `command` field, truncate to 60 chars
+- **File read/write/edit:** Extract `path` or `file_path` field
+- **Grep/glob:** Extract `pattern` or `query` field
+- **Other:** First string-valued field, truncated to 60 chars
+- **Fallback:** `args...` if no suitable field found
 
 #### Result Summary
 
@@ -112,19 +128,38 @@ Immediately on typing `/`. Closes when:
 | Type more chars | Filter commands in real-time |
 | `↑` / `↓` | Navigate selection (wraps around) |
 | `Tab` | Insert highlighted command name into input, close palette. User continues typing args. |
-| `Enter` | If palette has highlight: insert highlighted command name, close palette, **do NOT submit**. If palette has no highlight (user typed full command): submit input directly. |
+| `Enter` | See Enter rules below. |
 | `Esc` | Close palette, clear input |
 
-#### Rationale for Tab vs Enter
+#### Enter Rules
 
-- **Tab** = "complete the command name, I'll type args" → for commands like `/model deepseek-v4-pro`
-- **Enter with highlight** = same as Tab (complete but don't submit)
-- **Enter without highlight** = "I typed the full command, execute it"
-- This avoids the conflict where Enter both selects and executes
+Enter behavior depends on whether the input exactly matches a command name:
+
+| Condition | Enter Behavior |
+|---|---|
+| Input matches a command exactly (e.g. `/help`) | **Execute** the command directly. Close palette. |
+| Input is a prefix of commands (e.g. `/he`) | **Complete** to highlighted command name. Close palette. Do NOT submit. |
+| Palette highlight active, input differs from highlight | **Complete** to highlighted command name. Close palette. Do NOT submit. |
+| Input has no matching command | **Submit** as-is (will produce "Unknown command" error). |
+
+**Key rule:** Enter only executes when the input is already a valid, complete command name (exact match via `commandRegistry.has(name)`). Otherwise Enter completes, and the user presses Enter again to execute.
+
+**Examples:**
+- `/help` → Enter → executes `/help` (exact match, 1 keypress)
+- `/he` → palette highlights `/help` → Enter → inserts `/help` → Enter again → executes (2 keypresses)
+- `/model` → palette highlights `/model` → Enter → inserts `/model` → user types ` deepseek` → Enter → executes `/model deepseek`
+- `/xyz` → no match → Enter → submits → "Unknown command" error
+
+#### Rationale
+
+- **Tab** = always complete (never execute). Safe for commands with args.
+- **Enter** = execute if ready, complete if not. Two-step for prefix matches prevents accidental execution of wrong command.
+- Exact match detection via `commandRegistry.has(name)` is unambiguous — no guessing about "did the user mean this?"
 
 #### Data Source
 
-`CommandRegistry.getCommands()` — returns `{ name, aliases, description }[]`.
+`commandRegistry.list()` — returns `Command[]` with `{ name, description, usage?, aliases?, hidden? }`.
+Filter out `hidden` commands (already done by `list()`). Render palette rows using `name`, `aliases` (in parentheses), `description`, and `usage` (if present, shown dim after description).
 
 #### Display
 
@@ -159,7 +194,7 @@ Max 8 visible items. If more, show `↑ more` / `↓ more` indicators.
 Provider.chat()                    query()                          REPL UI
 ─────────────────                  ────────                         ───────
 tool_call_start(id, name)    →    yield event                 →    Add OutputLine {type:"tool", state:"pending"}
-tool_call_args(id, json)     →    yield event (×N chunks)     →    Update OutputLine params (last chunk wins)
+tool_call_args(id, json)     →    yield event (×N chunks)     →    Accumulate args_json per id, try JSON.parse, update params on success
                                    scheduleToolCalls()
                                    [no event during execution]
 tool_call_result(id,result)  →    yield event                 →    Update OutputLine {state:"success/error"}
@@ -517,7 +552,8 @@ Use `useStdout().columns` and `useStdout().rows` for responsive layout:
 
 #### ToolStatus
 - [ ] `tool_call_start` shows dim pending indicator
-- [ ] `tool_call_args` updates param display
+- [ ] `tool_call_args` accumulates JSON, updates param display only when JSON.parse succeeds
+- [ ] `tool_call_args` shows `args...` when JSON not yet parseable
 - [ ] `tool_call_result` success shows green with summary
 - [ ] `tool_call_result` error shows red with error message
 - [ ] Multiple parallel tool calls display correctly
@@ -528,8 +564,9 @@ Use `useStdout().columns` and `useStdout().rows` for responsive layout:
 - [ ] Typing more chars filters palette in real-time
 - [ ] `↑`/`↓` navigates selection (wraps around)
 - [ ] `Tab` inserts command name, closes palette, does not submit
-- [ ] `Enter` with highlight inserts command, does not submit
-- [ ] `Enter` without highlight submits input
+- [ ] `Enter` on exact match (e.g. `/help`) executes command directly
+- [ ] `Enter` on prefix (e.g. `/he`) completes to highlighted command, does not submit
+- [ ] `Enter` on no match submits as-is (produces "Unknown command" error)
 - [ ] `Esc` closes palette, clears input
 - [ ] Aliases shown in parentheses
 - [ ] Max 8 items visible, scroll indicators for more
