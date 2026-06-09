@@ -21,7 +21,7 @@ import { getPermissionRules } from "../commands/builtin/permissions.js";
 import { loadMcpToolsIntoRegistry, disconnectAll } from "../tools/mcp/loader.js";
 import type { McpServerConfig } from "../tools/mcp/client.js";
 import type { McpServerSetting } from "../config/settings.js";
-import { McpAuthCache } from "../tools/mcp/auth-cache.js";
+import { getSharedAuthCache } from "../tools/mcp/auth-cache.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -75,9 +75,9 @@ export function ReplApp({
     // Initialize tools and permissions FIRST (always available, even if prompt fails)
     const toolRegistry = createBuiltinRegistry();
     const toolContext = { cwd };
-    // Load MCP tools from config with auth cache
+    // Load MCP tools from config with shared auth cache
     const mcpServersConfig = commandContext.config?.mcpServers as Record<string, McpServerSetting> | undefined;
-    const mcpAuthCache = new McpAuthCache();
+    const mcpAuthCache = getSharedAuthCache();
     const mcpLoadPromise = mcpServersConfig
       ? loadMcpToolsIntoRegistry(
           Object.entries(mcpServersConfig).map(

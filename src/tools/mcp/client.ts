@@ -75,6 +75,7 @@ export class McpClient {
   private client: Client | undefined;
   private transport: Transport | undefined;
   private _connected = false;
+  private connectPromise: Promise<void> | null = null;
 
   constructor(config: McpServerConfig) {
     this.config = config;
@@ -132,32 +133,38 @@ export class McpClient {
     }
   }
 
-  /** Connect to the MCP server. */
+  /** Connect to the MCP server. Caches the promise for concurrent calls. */
   async connect(timeoutMs: number = 30_000): Promise<void> {
     if (this._connected) return;
+    if (this.connectPromise) return this.connectPromise;
 
-    try {
-      this.transport = this.createTransport();
-      this.client = new Client(
-        { name: "slc-code", version: "1.0.0" },
-        { capabilities: {} },
-      );
-      await timeoutPromise(
-        this.client.connect(this.transport),
-        timeoutMs,
-        this.config.name,
-        "connect",
-      );
-      this._connected = true;
-    } catch (err) {
-      this._connected = false;
-      throw this.wrapError(err, "connect");
-    }
+    this.connectPromise = (async () => {
+      try {
+        this.transport = this.createTransport();
+        this.client = new Client(
+          { name: "slc-code", version: "1.0.0" },
+          { capabilities: {} },
+        );
+        await timeoutPromise(
+          this.client.connect(this.transport),
+          timeoutMs,
+          this.config.name,
+          "connect",
+        );
+        this._connected = true;
+      } catch (err) {
+        this._connected = false;
+        this.connectPromise = null;
+        throw this.wrapError(err, "connect");
+      }
+    })();
+
+    return this.connectPromise;
   }
 
   /** Disconnect from the MCP server. */
   async disconnect(): Promise<void> {
-    if (!this._connected) return;
+    if (!this._connected && !this.connectPromise) return;
     try {
       if (this.client) {
         await this.client.close();
@@ -168,6 +175,7 @@ export class McpClient {
       this._connected = false;
       this.client = undefined;
       this.transport = undefined;
+      this.connectPromise = null; // Allow reconnect
     }
   }
 
@@ -188,21 +196,25 @@ export class McpClient {
       }));
     } catch (err) {
       const mcpErr = this.wrapError(err, "listTools");
-      if (mcpErr.code === -32001) {
+      if (mcpErr.kind === "session_expired") {
         // Session expired — reconnect and retry once
         await this.disconnect();
         await this.connect(timeoutMs);
-        const result = await timeoutPromise(
-          this.client!.listTools(),
-          timeoutMs,
-          this.config.name,
-          "listTools",
-        );
-        return result.tools.map((t) => ({
-          name: t.name,
-          description: t.description ?? "",
-          inputSchema: t.inputSchema as Record<string, unknown>,
-        }));
+        try {
+          const result = await timeoutPromise(
+            this.client!.listTools(),
+            timeoutMs,
+            this.config.name,
+            "listTools",
+          );
+          return result.tools.map((t) => ({
+            name: t.name,
+            description: t.description ?? "",
+            inputSchema: t.inputSchema as Record<string, unknown>,
+          }));
+        } catch (retryErr) {
+          throw this.wrapError(retryErr, "listTools(retry)");
+        }
       }
       throw mcpErr;
     }
@@ -247,33 +259,37 @@ export class McpClient {
       };
     } catch (err) {
       const mcpErr = this.wrapError(err, `callTool(${name})`);
-      if (mcpErr.code === -32001) {
+      if (mcpErr.kind === "session_expired") {
         // Session expired — reconnect and retry once
         await this.disconnect();
         await this.connect(timeoutMs);
-        const result = await timeoutPromise(
-          this.client!.callTool({ name, arguments: args }),
-          timeoutMs,
-          this.config.name,
-          `callTool(${name})`,
-        );
-        const callResult = result as {
-          content?: Array<{ type: string; text?: string }>;
-          isError?: boolean;
-        };
-        if (Array.isArray(callResult.content)) {
-          const texts = callResult.content
-            .filter((c) => c.type === "text" && typeof c.text === "string")
-            .map((c) => c.text as string);
+        try {
+          const result = await timeoutPromise(
+            this.client!.callTool({ name, arguments: args }),
+            timeoutMs,
+            this.config.name,
+            `callTool(${name})`,
+          );
+          const callResult = result as {
+            content?: Array<{ type: string; text?: string }>;
+            isError?: boolean;
+          };
+          if (Array.isArray(callResult.content)) {
+            const texts = callResult.content
+              .filter((c) => c.type === "text" && typeof c.text === "string")
+              .map((c) => c.text as string);
+            return {
+              content: texts.join("\n") || JSON.stringify(callResult.content),
+              isError: callResult.isError,
+            };
+          }
           return {
-            content: texts.join("\n") || JSON.stringify(callResult.content),
+            content: JSON.stringify(result),
             isError: callResult.isError,
           };
+        } catch (retryErr) {
+          throw this.wrapError(retryErr, `callTool(${name}, retry)`);
         }
-        return {
-          content: JSON.stringify(result),
-          isError: callResult.isError,
-        };
       }
       throw mcpErr;
     }

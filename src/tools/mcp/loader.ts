@@ -24,13 +24,18 @@ const connectionCache = new Map<string, McpClient>();
 
 function cacheKey(config: McpServerConfig): string {
   // Include full config in cache key — "同一 server 配置只建一次连接"
-  // Exclude env from key to avoid leaking secrets, but include transport/command/url/args
+  // env is included via stable key-sorting to distinguish different configs
+  // Use empty object instead of undefined for consistent JSON serialization
+  const stableEnv = config.env
+    ? Object.fromEntries(Object.entries(config.env).sort())
+    : {};
   return JSON.stringify({
     name: config.name,
     transport: config.transport,
     command: config.command,
     args: config.args,
     url: config.url,
+    env: stableEnv,
   });
 }
 

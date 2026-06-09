@@ -815,3 +815,167 @@ describe("McpClient ws transport", () => {
     await expect(client.connect()).rejects.toThrow(/url.*required.*ws/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Timeout tests
+// ---------------------------------------------------------------------------
+
+describe("McpClient timeout", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClose.mockResolvedValue(undefined);
+  });
+
+  it("connect timeout produces McpError with kind timeout", async () => {
+    // Never-resolving promise simulates timeout
+    mockConnect.mockReturnValue(new Promise(() => {}));
+
+    const client = new McpClient({ name: "timeout-server", transport: "stdio", command: "echo" });
+    const err = await client.connect(100).catch((e) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.kind).toBe("timeout");
+    expect(err.message).toContain("timed out");
+  });
+
+  it("listTools timeout produces McpError with kind timeout", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    mockListTools.mockReturnValue(new Promise(() => {})); // never resolves
+
+    const client = new McpClient({ name: "timeout-server", transport: "stdio", command: "echo" });
+    await client.connect();
+    const err = await client.listTools(100).catch((e) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.kind).toBe("timeout");
+  });
+
+  it("callTool timeout produces McpError with kind timeout", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    mockCallTool.mockReturnValue(new Promise(() => {})); // never resolves
+
+    const client = new McpClient({ name: "timeout-server", transport: "stdio", command: "echo" });
+    await client.connect();
+    const err = await client.callTool("tool", {}, 100).catch((e) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.kind).toBe("timeout");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session expired auto-reconnect tests
+// ---------------------------------------------------------------------------
+
+describe("McpClient session expired auto-reconnect", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClose.mockResolvedValue(undefined);
+  });
+
+  it("listTools retries once on -32001", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    const sessionErr = Object.assign(new Error("Session expired"), { code: -32001 });
+    mockListTools
+      .mockRejectedValueOnce(sessionErr)
+      .mockResolvedValueOnce({ tools: [{ name: "t", description: "T", inputSchema: {} }] });
+
+    const client = new McpClient({ name: "retry-server", transport: "stdio", command: "echo" });
+    await client.connect();
+    const tools = await client.listTools();
+
+    expect(tools).toHaveLength(1);
+    expect(tools[0].name).toBe("t");
+    // disconnect + reconnect happened (connect called twice)
+    expect(mockConnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("callTool retries once on HTTP 404", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    const notFoundErr = Object.assign(new Error("Not Found"), { statusCode: 404 });
+    mockCallTool
+      .mockRejectedValueOnce(notFoundErr)
+      .mockResolvedValueOnce({ content: [{ type: "text", text: "result" }] });
+
+    const client = new McpClient({ name: "retry-server", transport: "stdio", command: "echo" });
+    await client.connect();
+    const result = await client.callTool("tool", {});
+
+    expect(result.content).toBe("result");
+    expect(mockConnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("non-session error does NOT retry", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    mockListTools.mockRejectedValueOnce(new Error("connection refused"));
+
+    const client = new McpClient({ name: "no-retry", transport: "stdio", command: "echo" });
+    await client.connect();
+    await expect(client.listTools()).rejects.toThrow(/connection refused/);
+
+    // Only initial connect, no reconnect
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("retry failure returns the error", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    const sessionErr = Object.assign(new Error("Session expired"), { code: -32001 });
+    mockListTools
+      .mockRejectedValueOnce(sessionErr)
+      .mockRejectedValueOnce(sessionErr); // retry also fails
+
+    const client = new McpClient({ name: "retry-fail", transport: "stdio", command: "echo" });
+    await client.connect();
+    await expect(client.listTools()).rejects.toThrow(McpError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Connection cache key — env differentiation
+// ---------------------------------------------------------------------------
+
+describe("Connection cache env differentiation", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockClose.mockResolvedValue(undefined);
+    mockListTools.mockResolvedValue({ tools: [] });
+    await disconnectAll();
+  });
+
+  it("same name but different env creates new connection", async () => {
+    const configs: McpServerConfig[] = [
+      { name: "server", transport: "stdio", command: "echo", env: { TOKEN: "a" } },
+      { name: "server", transport: "stdio", command: "echo", env: { TOKEN: "b" } },
+    ];
+    const registry = new ToolRegistry();
+    await loadMcpToolsIntoRegistry(configs, registry);
+
+    // Both should have connected (different cache keys)
+    expect(mockConnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("identical config reuses connection", async () => {
+    const configs: McpServerConfig[] = [
+      { name: "server", transport: "stdio", command: "echo" },
+      { name: "server", transport: "stdio", command: "echo" },
+    ];
+    const registry = new ToolRegistry();
+    await loadMcpToolsIntoRegistry(configs, registry);
+
+    // Only one connect (cache hit)
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared auth cache
+// ---------------------------------------------------------------------------
+
+describe("Shared auth cache", () => {
+  it("getSharedAuthCache returns same instance across calls", async () => {
+    const { getSharedAuthCache, resetSharedAuthCache } = await import("../../src/tools/mcp/auth-cache.js");
+    resetSharedAuthCache();
+    const a = getSharedAuthCache();
+    const b = getSharedAuthCache();
+    expect(a).toBe(b);
+    resetSharedAuthCache();
+  });
+});

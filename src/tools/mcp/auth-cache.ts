@@ -80,3 +80,26 @@ export class McpAuthCache {
     this.entries.clear();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Process-level shared instance
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared process-level auth cache — persists across REPL restarts and
+ * non-interactive calls within the same process. Ensures 15-minute
+ * failure shortsurvives across function calls.
+ */
+let _sharedCache: McpAuthCache | null = null;
+
+export function getSharedAuthCache(): McpAuthCache {
+  if (!_sharedCache) {
+    _sharedCache = new McpAuthCache();
+  }
+  return _sharedCache;
+}
+
+/** Reset shared cache (for testing). */
+export function resetSharedAuthCache(): void {
+  _sharedCache = null;
+}
