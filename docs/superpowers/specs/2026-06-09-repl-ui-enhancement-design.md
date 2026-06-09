@@ -223,9 +223,8 @@ When multiple input modes are active, priority is:
 |---|---|---|
 | Normal | `/` | Open palette |
 | Palette open | `Esc` | Close palette, clear input |
-| Palette open | `Tab` | Insert command, close palette |
-| Palette open | `Enter` (with highlight) | Insert command, close palette |
-| Palette open | `Enter` (no highlight) | Submit input |
+| Palette open | `Tab` | Insert highlighted command, close palette |
+| Palette open | `Enter` | Follow CommandPalette Enter Rules (see above) |
 | Palette open | `↑`/`↓` | Navigate palette |
 | History mode | `↑`/`↓` | Navigate history |
 | History mode | Any char | Exit history, start typing |
@@ -267,7 +266,7 @@ On `done` event:
 
 ```
 tool_call_start  →  pending (dim, no params yet)
-tool_call_args   →  pending (dim, params visible after last chunk)
+tool_call_args   →  pending (dim, params visible when accumulated JSON becomes parseable)
 tool_call_result →  success (green) or error (red)
 ```
 
