@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { QueryEngine } from "../engine/engine.js";
 import type { Provider } from "../engine/providers/base.js";
-import type { StreamEvent } from "../engine/types.js";
+import type { StreamEvent, ProviderMessage } from "../engine/types.js";
 import type { CommandRegistry, CommandContext, Command } from "../commands/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { createResumeSession, createRewindToEvent } from "./session-runtime.js";
@@ -188,11 +188,32 @@ export function ReplApp({
     toolRegistryRef.current = toolRegistry;
     permissionCheckerRef.current = permissionChecker;
 
-    // Then build system prompt + load MCP tools (may fail — fallback only degrades prompt, not tools)
-    engineInitRef.current = Promise.all([
-      sm.cleanupAndInit(cleanupPeriodDays),
-      mcpLoadPromise,
-    ]).then(async () => {
+    // When resuming, skip session cleanup (pass -1) to avoid deleting the target session.
+    const effectiveCleanupDays = resumeDir ? -1 : cleanupPeriodDays;
+
+    // Build init chain: load resume transcript → cleanup + MCP → create engine
+    engineInitRef.current = (async () => {
+      // Step 1: Load resume transcript BEFORE cleanup to prevent deletion
+      let resumeMessages: ProviderMessage[] | null = null;
+      if (resumeDir) {
+        const result = await loadTranscript(resumeDir);
+        if (result.success && result.events.length > 0) {
+          resumeMessages = rebuildSessionState(result.events);
+        } else {
+          const msg = result.error
+            ? `Failed to load session: ${result.error}`
+            : "Resume session has no conversation history.";
+          setOutput((prev) => [...prev, createSystemLine(`[Resume] ${msg}`)]);
+        }
+      }
+
+      // Step 2: Cleanup + MCP load
+      await Promise.all([
+        sm.cleanupAndInit(effectiveCleanupDays),
+        mcpLoadPromise,
+      ]);
+
+      // Step 3: Build system prompt + create engine
       let systemPrompt: string | undefined;
       try {
         systemPrompt = await assembleSystemPrompt({ cwd, userConfigDir });
@@ -206,14 +227,12 @@ export function ReplApp({
         toolContext,
         permissionChecker,
       });
-      // --resume: load transcript from previous session into engine
-      if (resumeDir) {
-        const result = await loadTranscript(resumeDir);
-        if (result.success && result.events.length > 0) {
-          const messages = rebuildSessionState(result.events);
-          engineRef.current.loadMessages(messages);
-          await sm.switchSession(resumeDir);
-        }
+
+      // Step 4: Inject resume messages
+      if (resumeDir && resumeMessages) {
+        engineRef.current.loadMessages(resumeMessages);
+        await sm.switchSession(resumeDir);
+        setOutput((prev) => [...prev, createSystemLine("[Resume] Restored previous conversation.")]);
       }
       setAgentContext({
         provider,
@@ -221,7 +240,7 @@ export function ReplApp({
         toolRegistry,
         permissionChecker,
       });
-    }).catch(() => {
+    })().catch(() => {
       // Even if session init fails, create engine with tools
       engineRef.current = new QueryEngine(provider, {
         tools: toolRegistry.toProviderTools(),

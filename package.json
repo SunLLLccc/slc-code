@@ -19,7 +19,6 @@
     "dist",
     "resources"
   ],
-  "bundledDependencies": true,
   "engines": {
     "node": ">=22"
   },
