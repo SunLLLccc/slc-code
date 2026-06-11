@@ -165,6 +165,11 @@ export class SessionManager {
     return this._initialized;
   }
 
+  /** Whether the session writer is active (cleanupPeriodDays=0 or bare → false) */
+  get writable(): boolean {
+    return this._writable;
+  }
+
   /** Close the current writer */
   close(): void {
     this.writer?.close();

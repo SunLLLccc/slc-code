@@ -188,8 +188,11 @@ export function ReplApp({
     toolRegistryRef.current = toolRegistry;
     permissionCheckerRef.current = permissionChecker;
 
-    // When resuming, skip session cleanup (pass -1) to avoid deleting the target session.
-    const effectiveCleanupDays = resumeDir ? -1 : cleanupPeriodDays;
+    // Resume cleanup strategy:
+    // - cleanupPeriodDays=0: always use 0 — no writer, cleanup all (P8 semantic preserved)
+    // - cleanupPeriodDays>0 with resume: use -1 — skip cleanup to preserve target session
+    // - cleanupPeriodDays>0 without resume: use configured value
+    const effectiveCleanupDays = (resumeDir && cleanupPeriodDays > 0) ? -1 : cleanupPeriodDays;
 
     // Build init chain: load resume transcript → cleanup + MCP → create engine
     engineInitRef.current = (async () => {
@@ -231,8 +234,14 @@ export function ReplApp({
       // Step 4: Inject resume messages
       if (resumeDir && resumeMessages) {
         engineRef.current.loadMessages(resumeMessages);
-        await sm.switchSession(resumeDir);
-        setOutput((prev) => [...prev, createSystemLine("[Resume] Restored previous conversation.")]);
+        if (sm.writable) {
+          // cleanupPeriodDays>0: switch to resumed session with writer
+          await sm.switchSession(resumeDir);
+          setOutput((prev) => [...prev, createSystemLine("[Resume] Restored previous conversation.")]);
+        } else {
+          // cleanupPeriodDays=0 or bare: read-only resume, no transcript writer
+          setOutput((prev) => [...prev, createSystemLine("[Resume] Restored previous conversation (read-only, no persistence).")]);
+        }
       }
       setAgentContext({
         provider,
