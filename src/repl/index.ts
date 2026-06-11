@@ -11,6 +11,9 @@ export interface ReplOptions {
   commandRegistry: CommandRegistry;
   commandContext: CommandContext;
   model?: string;
+  version?: string;
+  /** Session directory to resume on startup (from --resume) */
+  resumeDir?: string;
 }
 
 /**
@@ -25,6 +28,8 @@ export function launchRepl(options: ReplOptions): Promise<void> {
         commandRegistry: options.commandRegistry,
         commandContext: options.commandContext,
         initialModel: options.model,
+        version: options.version,
+        resumeDir: options.resumeDir,
       }),
     );
 

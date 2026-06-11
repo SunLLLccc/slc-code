@@ -15,6 +15,7 @@ import { persistSessionMemory } from "../memory/session-memory-lifecycle.js";
 import { processAutoMemory } from "../memory/auto-memory-lifecycle.js";
 import { createBuiltinRegistry } from "../tools/builtin/registry-factory.js";
 import { setAgentContext } from "../tools/builtin/agent.js";
+import { loadTranscript, rebuildSessionState } from "../session/resume.js";
 import { createPermissionChecker } from "../permissions/checker.js";
 import { getRuntimePermissionMode } from "../tools/builtin/plan-mode.js";
 import { parseRule, type PermissionRule } from "../permissions/rules.js";
@@ -51,6 +52,7 @@ import { InputLine } from "./components/InputLine.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { ToolStatusLine } from "./components/ToolStatus.js";
 import { MarkdownBlock } from "./components/MarkdownBlock.js";
+import { StartupPanel } from "./components/StartupPanel.js";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -61,6 +63,9 @@ export interface ReplAppProps {
   commandRegistry: CommandRegistry;
   commandContext: CommandContext;
   initialModel?: string;
+  version?: string;
+  /** Session directory to resume on startup (from --resume) */
+  resumeDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +81,8 @@ export function ReplApp({
   commandRegistry,
   commandContext,
   initialModel,
+  version,
+  resumeDir,
 }: ReplAppProps) {
   const { exit } = useApp();
   const [input, setInput] = useState("");
@@ -113,6 +120,7 @@ export function ReplApp({
   const sessionsBase = (commandContext.config?.sessionsBase as string) ?? undefined;
   const persistenceEnabled = sessionConfig?.persistenceEnabled ?? true;
   const cleanupPeriodDays = sessionConfig?.cleanupPeriodDays ?? 30;
+  const userConfigDir = join(homedir(), ".slc");
   const sessionManagerRef = useRef<SessionManager>(
     new SessionManager({ sessionsBase, enabled: persistenceEnabled }),
   );
@@ -147,7 +155,6 @@ export function ReplApp({
   useEffect(() => {
     const sm = sessionManagerRef.current;
     const cwd = (commandContext.config?.cwd as string) ?? process.cwd();
-    const userConfigDir = join(homedir(), ".slc");
 
     // Initialize tools and permissions FIRST (always available, even if prompt fails)
     const toolRegistry = createBuiltinRegistry();
@@ -199,6 +206,15 @@ export function ReplApp({
         toolContext,
         permissionChecker,
       });
+      // --resume: load transcript from previous session into engine
+      if (resumeDir) {
+        const result = await loadTranscript(resumeDir);
+        if (result.success && result.events.length > 0) {
+          const messages = rebuildSessionState(result.events);
+          engineRef.current.loadMessages(messages);
+          await sm.switchSession(resumeDir);
+        }
+      }
       setAgentContext({
         provider,
         sessionDir: sm.sessionDir ?? cwd,
@@ -412,6 +428,7 @@ export function ReplApp({
           cleanupPeriodDays,
           cwd,
           memoryDir: commandContext.config?.memoryDir as string | undefined,
+          userConfigDir,
         });
       }
 
@@ -559,18 +576,25 @@ export function ReplApp({
         }
         return;
       }
-      // Regular typing in palette: update filter
-      if (ch && !key.ctrl && !key.meta) {
-        if (key.backspace) {
-          const newFilter = paletteFilter.slice(0, -1);
-          if (!newFilter && !input.startsWith("/")) {
-            setShowPalette(false);
-          }
-          setPaletteFilter(newFilter);
-          setPaletteIndex(0);
-          return;
+      // Backspace in palette: remove last char from input and filter
+      if (key.backspace) {
+        const newInput = input.slice(0, -1);
+        setInput(newInput);
+        const newFilter = newInput.startsWith("/") ? newInput.slice(1) : newInput;
+        if (!newFilter) {
+          setShowPalette(false);
         }
-        setPaletteFilter((prev) => prev + ch);
+        setPaletteFilter(newFilter);
+        setPaletteIndex(0);
+        return;
+      }
+      // Regular typing in palette: update both input and filter
+      if (ch && !key.ctrl && !key.meta) {
+        const newInput = input + ch;
+        setInput(newInput);
+        // Derive filter from input (strip leading /)
+        const newFilter = newInput.startsWith("/") ? newInput.slice(1) : newInput;
+        setPaletteFilter(newFilter);
         setPaletteIndex(0);
         return;
       }
@@ -636,6 +660,11 @@ export function ReplApp({
   return (
     <Box flexDirection="column">
       <TopBar model={currentModel} sessionId={sessionId} />
+      <StartupPanel
+        version={version ?? "0.0.0"}
+        model={currentModel}
+        cwd={(commandContext.config?.cwd as string) ?? process.cwd()}
+      />
       {output.map((line, i) => {
         if (line.type === "tool" && line.toolStatus) {
           return (

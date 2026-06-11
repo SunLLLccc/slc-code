@@ -8,7 +8,7 @@ describe("TopBar", () => {
     const { lastFrame } = render(
       <TopBar model="deepseek-v4-pro" sessionId="abc-123-def" />,
     );
-    expect(lastFrame()).toContain("slc-code");
+    expect(lastFrame()).toContain("slc code");
   });
 
   it("displays model name", () => {

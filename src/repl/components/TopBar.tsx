@@ -19,7 +19,7 @@ export function TopBar({ model, sessionId }: TopBarProps) {
       borderRight={false}
       paddingX={1}
     >
-      <Text bold>slc-code</Text>
+      <Text bold>slc code</Text>
       <Text dimColor> │ </Text>
       <Text>{model}</Text>
       <Text dimColor> │ </Text>

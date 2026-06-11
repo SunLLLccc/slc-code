@@ -169,4 +169,50 @@ describe("extractMemories", () => {
     const result = extractMemories(text);
     expect(result).toHaveLength(1);
   });
+
+  // Chinese patterns — input is user message only (not combined conversation)
+  it('finds "记住..." pattern', () => {
+    const result = extractMemories("记住要和我说中文");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0].content).toContain("和我说中文");
+  });
+
+  it('finds "以后..." pattern', () => {
+    const result = extractMemories("以后都用中文回复我");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0].content).toContain("中文回复");
+  });
+
+  it('finds "我喜欢..." pattern', () => {
+    const result = extractMemories("我喜欢用 tab 缩进");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0].content).toContain("tab");
+  });
+
+  it('finds "请记住..." pattern', () => {
+    const result = extractMemories("请记住用中文");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0].content).toContain("中文");
+  });
+
+  it("captures short preferences (relaxed from 10 to 3 chars)", () => {
+    const result = extractMemories("I prefer vim");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0].content).toContain("vim");
+  });
+
+  it("does NOT extract from assistant-style responses", () => {
+    // Simulating a model response that mentions "记住" — should NOT be extracted
+    const result = extractMemories("我只能记住我们聊过的内容。但这不是真正的记忆。以后如果需要帮助，随时告诉我。");
+    expect(result).toHaveLength(0);
+  });
+
+  it("uses content hash for unique stable names", () => {
+    const r1 = extractMemories("I prefer dark mode");
+    const r2 = extractMemories("I prefer light mode");
+    expect(r1[0].name).not.toBe(r2[0].name);
+    // Same content → same name (stable)
+    const r3 = extractMemories("I prefer dark mode");
+    expect(r3[0].name).toBe(r1[0].name);
+  });
 });

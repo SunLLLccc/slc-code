@@ -16,8 +16,10 @@
     "build": "tsc"
   },
   "files": [
-    "dist"
+    "dist",
+    "resources"
   ],
+  "bundledDependencies": true,
   "engines": {
     "node": ">=22"
   },
