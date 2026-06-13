@@ -6,13 +6,16 @@
 
 import { Command } from "commander";
 import { resolve as resolvePath } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { setup } from "../core/setup.js";
 import { createProvider } from "../engine/providers/factory.js";
 import { executePrint, executeStdin } from "../core/noninteractive.js";
 import { createDefaultRegistry } from "../commands/index.js";
 import { launchRepl } from "../repl/index.js";
+import { getAvailableSessions } from "../session/resume.js";
 import { logger } from "../utils/logger.js";
 import { SlcError, errorMessage } from "../utils/errors.js";
 import type { Provider } from "../engine/providers/base.js";
@@ -92,6 +95,7 @@ export function createProgram(
     .helpOption("-h, --help", "Print help")
     .option("-p, --print <query>", "Non-interactive single query")
     .option("--stdin", "Read query from stdin")
+    .option("-r, --resume", "Resume the most recent conversation")
     .option("-m, --model <model>", "Override model")
     .option("--permission-mode <mode>", "Override permission mode")
     .option("--cwd <path>", "Set working directory")
@@ -203,11 +207,28 @@ export function createProgram(
           config: config as unknown as Record<string, unknown>,
         };
 
+        // --resume: find most recent session
+        let resumeDir: string | undefined;
+        if (options.resume) {
+          const sessionsBase = (config as Record<string, unknown>).sessionsBase as string | undefined
+            ?? join(homedir(), ".slc", "sessions");
+          const sessions = await getAvailableSessions(sessionsBase);
+          if (sessions.length > 0) {
+            resumeDir = join(sessionsBase, sessions[0]!);
+          } else {
+            process.stderr.write("No previous sessions found to resume.\n");
+            actionExitCode?.resolve(EXIT_CODE.ERROR);
+            return;
+          }
+        }
+
         await doLaunchRepl({
           provider,
           commandRegistry: registry,
           commandContext: ctx,
           model,
+          version,
+          resumeDir,
         });
         actionExitCode?.resolve(EXIT_CODE.SUCCESS);
       } catch (e) {
@@ -261,6 +282,10 @@ export async function main(argv: string[]): Promise<number> {
 
 // Run when executed directly (not when imported by tests or other modules)
 const thisFile = fileURLToPath(import.meta.url);
-if (process.argv[1] && resolvePath(process.argv[1]) === thisFile) {
+const thisFileReal = realpathSync(thisFile);
+const argv1Real = process.argv[1]
+  ? realpathSync(resolvePath(process.argv[1]))
+  : undefined;
+if (argv1Real && argv1Real === thisFileReal) {
   main(process.argv).then((code) => process.exit(code));
 }

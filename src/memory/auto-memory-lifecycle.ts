@@ -1,6 +1,7 @@
 // Auto Memory Lifecycle — post-conversation auto-memory extraction and writing
 // Extracted from app.tsx for testability
 
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { extractMemories } from "./auto-memory.js";
 import { writeAutoMemories } from "./auto-memory-store.js";
@@ -16,6 +17,8 @@ export interface AutoMemoryOptions {
   cwd: string;
   /** Explicit memoryDir override from config */
   memoryDir?: string;
+  /** User config directory (default ~/.slc) — used as default memory write path */
+  userConfigDir?: string;
 }
 
 /**
@@ -29,7 +32,7 @@ export interface AutoMemoryOptions {
  *
  * Memory directory priority:
  * 1. Explicit config.memoryDir
- * 2. Project {cwd}/.slc/memory
+ * 2. User config dir ~/.slc/memory (same path used by prompt assembly for reading)
  */
 export async function processAutoMemory(
   userMessage: string,
@@ -41,13 +44,14 @@ export async function processAutoMemory(
   if (!options.autoMemoryEnabled) return 0;
   if (options.cleanupPeriodDays === 0) return 0;
 
-  // Extract memories from conversation
-  const conversation = `user: ${userMessage}\nassistant: ${assistantResponse}`;
-  const memories = extractMemories(conversation);
+  // Extract memories from user message only (NOT assistant response)
+  // This prevents matching patterns like "记住" or "以后" in the model's own text
+  const memories = extractMemories(userMessage);
   if (memories.length === 0) return 0;
 
-  // Resolve memory directory: config.memoryDir > project .slc/memory
-  const memoryDir = options.memoryDir ?? join(options.cwd, ".slc", "memory");
+  // Resolve memory directory: config.memoryDir > ~/.slc/memory (aligned with read path)
+  const configDir = options.userConfigDir ?? join(homedir(), ".slc");
+  const memoryDir = options.memoryDir ?? join(configDir, "memory");
 
   return writeAutoMemories(memoryDir, memories, { enabled: true });
 }

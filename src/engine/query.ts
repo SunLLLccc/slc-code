@@ -12,6 +12,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import { scheduleToolCalls, type ToolCall as SchedulerToolCall } from "../tools/scheduler.js";
 import type { ToolContext } from "../tools/base.js";
 import type { PermissionChecker } from "../tools/scheduler.js";
+import { classifyPreflightIntent, getGreetingResponse } from "./preflight.js";
 
 export interface QueryOptions {
   maxTurns?: number;
@@ -58,6 +59,26 @@ export async function* query(
 
   // We work on a mutable copy so the caller's array is not modified
   const conversation = [...messages];
+
+  // Preflight: deterministic local intercept for greetings and model questions.
+  // Find the last user message and classify it.
+  {
+    const lastUserIdx = [...conversation].reverse().findIndex((m) => m.role === "user");
+    if (lastUserIdx !== -1) {
+      const idx = conversation.length - 1 - lastUserIdx;
+      const msg = conversation[idx];
+      if (msg && msg.role === "user") {
+        const intent = classifyPreflightIntent(msg.content);
+        if (intent === "greeting") {
+          const response = getGreetingResponse(msg.content);
+          yield { type: "text_delta", text: response };
+          yield { type: "done", reason: "completed" };
+          return;
+        }
+        // "model_question" and "none" fall through to normal provider flow
+      }
+    }
+  }
 
   while (turnCount < maxTurns) {
     turnCount++;

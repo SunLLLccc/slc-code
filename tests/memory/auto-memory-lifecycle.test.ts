@@ -81,19 +81,20 @@ describe("processAutoMemory", () => {
     expect(existsSync(memoryDir)).toBe(false);
   });
 
-  it("defaults memoryDir to {cwd}/.slc/memory when not specified", async () => {
+  it("defaults memoryDir to userConfigDir/memory when not specified", async () => {
+    const configDir = join(testDir, "config");
     const written = await processAutoMemory(conversation.user, conversation.assistant, {
       persistenceEnabled: true,
       autoMemoryEnabled: true,
       cleanupPeriodDays: 30,
       cwd: testDir,
-      // no memoryDir specified
+      userConfigDir: configDir,
     });
 
     expect(written).toBeGreaterThan(0);
-    const defaultDir = join(testDir, ".slc", "memory");
-    expect(existsSync(defaultDir)).toBe(true);
-    const files = await readdir(defaultDir);
+    const memoryDir = join(configDir, "memory");
+    expect(existsSync(memoryDir)).toBe(true);
+    const files = await readdir(memoryDir);
     expect(files.some((f) => f.endsWith(".md"))).toBe(true);
   });
 

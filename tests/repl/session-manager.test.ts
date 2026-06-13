@@ -246,4 +246,73 @@ describe("SessionManager state", () => {
     await sm.cleanupAndInit(30);
     expect(sm.isInitialized).toBe(true);
   });
+
+  it("writable is true after cleanupAndInit with cleanupPeriodDays>0", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(30);
+    expect(sm.writable).toBe(true);
+  });
+
+  it("writable is false after cleanupAndInit with cleanupPeriodDays=0", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    await sm.cleanupAndInit(0);
+    expect(sm.writable).toBe(false);
+  });
+
+  it("writable is false in bare mode", async () => {
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: false });
+    await sm.cleanupAndInit(30);
+    expect(sm.writable).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resume + cleanupPeriodDays=0 semantic
+// ---------------------------------------------------------------------------
+
+describe("SessionManager resume semantics", () => {
+  it("cleanupPeriodDays=0: switchSession does NOT create writer after resume", async () => {
+    // Create a session to "resume"
+    const resumeDir = join(testDir, "target-session");
+    await mkdir(resumeDir, { recursive: true });
+    await writeFile(join(resumeDir, "transcript.jsonl"), JSON.stringify({ type: "user", content: "old msg" }) + "\n");
+
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    // cleanupPeriodDays=0: deletes all sessions (including target), no writer
+    await sm.cleanupAndInit(0);
+
+    expect(sm.writable).toBe(false);
+    // Target session was cleaned up
+    expect(existsSync(resumeDir)).toBe(false);
+
+    // switchSession updates dir but no writer (writable=false)
+    await sm.switchSession(resumeDir);
+    expect(sm.sessionDir).toBe(resumeDir);
+
+    // Append is no-op — no transcript written
+    await sm.appendUserEvent("Should not persist");
+    expect(existsSync(join(resumeDir, "transcript.jsonl"))).toBe(false);
+  });
+
+  it("cleanupPeriodDays>0: switchSession creates writer and writes to resumed session", async () => {
+    // Create a session to resume
+    const resumeDir = join(testDir, "target-session");
+    await mkdir(resumeDir, { recursive: true });
+    await writeFile(join(resumeDir, "transcript.jsonl"), JSON.stringify({ type: "user", content: "old msg" }) + "\n");
+
+    const sm = new SessionManager({ sessionsBase: testDir, enabled: true });
+    // cleanupPeriodDays>0: skip cleanup with -1 to preserve target session
+    await sm.cleanupAndInit(-1);
+
+    expect(sm.writable).toBe(true);
+
+    // switchSession redirects writer to resumed session
+    await sm.switchSession(resumeDir);
+    await sm.appendUserEvent("New message after resume");
+
+    // Transcript now contains both old and new content
+    const content = await readFile(join(resumeDir, "transcript.jsonl"), "utf-8");
+    expect(content).toContain("old msg");
+    expect(content).toContain("New message after resume");
+  });
 });

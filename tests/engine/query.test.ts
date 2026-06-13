@@ -239,7 +239,7 @@ describe("query()", () => {
 
     const msgs = [
       { role: "system" as const, content: "You are helpful." },
-      { role: "user" as const, content: "Hi" },
+      { role: "user" as const, content: "Tell me something" },
     ];
     for await (const _ of query(provider, msgs)) {
       // consume
@@ -259,7 +259,7 @@ describe("QueryEngine", () => {
 
     // First query
     const events1: StreamEvent[] = [];
-    for await (const event of engine.query("Hello")) {
+    for await (const event of engine.query("What is 1+1")) {
       events1.push(event);
     }
     const text1 = await collectText(
@@ -284,7 +284,7 @@ describe("QueryEngine", () => {
     // Messages should have both user messages and both assistant responses
     const messages = engine.getMessages();
     expect(messages).toEqual([
-      { role: "user", content: "Hello" },
+      { role: "user", content: "What is 1+1" },
       { role: "assistant", content: "response" },
       { role: "user", content: "How are you?" },
       { role: "assistant", content: "response" },

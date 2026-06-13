@@ -508,4 +508,71 @@ describe("CLI integration with mock provider", () => {
     // Should NOT contain the old P2 placeholder
     expect(stdout).not.toContain("no provider connected yet");
   });
+
+  it("--resume option is defined with -r short flag", () => {
+    const program = createProgram();
+    const opts = program.options;
+    const resumeOpt = opts.find((o) => o.long === "--resume");
+    expect(resumeOpt).toBeDefined();
+    expect(resumeOpt?.short).toBe("-r");
+  });
+
+  it("-r returns ERROR when no sessions exist", async () => {
+    let stderr = "";
+    const origErr = process.stderr.write;
+    const origHome = process.env.HOME;
+    const tmpHome = join(tmpdir(), "slc-resume-empty-" + Math.random().toString(36).slice(2));
+
+    try {
+      process.stderr.write = (chunk: unknown) => { if (typeof chunk === "string") stderr += chunk; return true; };
+      mkdirSync(tmpHome, { recursive: true });
+      mkdirSync(join(tmpHome, ".slc", "sessions"), { recursive: true });
+      process.env.HOME = tmpHome;
+
+      const { deps } = makeMockDeps("repl test");
+      let exitCode = -1;
+      const actionExitCode = { resolve: (code: number) => { exitCode = code; } };
+      const program = createProgram(deps, actionExitCode);
+      await program.parseAsync(["node", "slc", "-r"], { from: "node" });
+
+      expect(exitCode).toBe(EXIT_CODE.ERROR);
+      expect(stderr).toContain("No previous sessions found");
+    } finally {
+      process.stderr.write = origErr;
+      process.env.HOME = origHome;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it("-r passes resumeDir to launchRepl when sessions exist", async () => {
+    let capturedResumeDir: string | undefined;
+    const origHome = process.env.HOME;
+    const tmpHome = join(tmpdir(), "slc-resume-test-" + Math.random().toString(36).slice(2));
+
+    try {
+      const sessionsBase = join(tmpHome, ".slc", "sessions");
+      mkdirSync(sessionsBase, { recursive: true });
+      const sessionDir = join(sessionsBase, "2026-06-11-test-session");
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(join(sessionDir, "transcript.jsonl"), JSON.stringify({ type: "user", content: "hello", uuid: "1" }) + "\n");
+      process.env.HOME = tmpHome;
+
+      const { deps } = makeMockDeps("repl test");
+      deps.launchReplFn = async (opts) => {
+        capturedResumeDir = (opts as Record<string, unknown>).resumeDir as string | undefined;
+      };
+
+      let exitCode = -1;
+      const actionExitCode = { resolve: (code: number) => { exitCode = code; } };
+      const program = createProgram(deps, actionExitCode);
+      await program.parseAsync(["node", "slc", "-r"], { from: "node" });
+
+      expect(exitCode).toBe(EXIT_CODE.SUCCESS);
+      expect(capturedResumeDir).toBeDefined();
+      expect(capturedResumeDir).toContain("2026-06-11-test-session");
+    } finally {
+      process.env.HOME = origHome;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
 });
